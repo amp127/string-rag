@@ -6,7 +6,7 @@
   "bugs": {
     "url": "https://github.com/amp127/string-rag/issues"
   },
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publishConfig": {
     "access": "public"
   },
@@ -73,7 +73,7 @@
     }
   },
   "dependencies": {
-    "ai": "^6.0.116"
+    "ai": "^6.0.0"
   },
   "peerDependencies": {
     "@convex-dev/workpool": "^0.3.0",
