@@ -80,6 +80,37 @@ export {
 
 const DEFAULT_SEARCH_LIMIT = 10;
 
+/**
+ * Embed a single value. Uses the model's doEmbed when the model is an object
+ * so we avoid the AI SDK's embed() path that calls logWarnings with possibly
+ * undefined warnings (which crashes when the provider omits warnings).
+ */
+async function embedSafe(params: {
+  model: EmbeddingModel;
+  value: string;
+}): Promise<{ embedding: number[]; usage?: EmbeddingModelUsage }> {
+  const { model, value } = params;
+  if (typeof model === "object" && model !== null && "doEmbed" in model) {
+    const result = await (
+      model as {
+        doEmbed(options: { values: string[] }): PromiseLike<{
+          embeddings: number[][];
+          usage?: { tokens: number };
+        }>;
+      }
+    ).doEmbed({ values: [value] });
+    const embedding = result.embeddings[0];
+    if (!embedding) {
+      throw new Error("Embedding model returned no embedding");
+    }
+    return {
+      embedding,
+      usage: result.usage ?? { tokens: 0 },
+    };
+  }
+  return embed({ model, value });
+}
+
 // This is 0-1 with 1 being the most important and 0 being totally irrelevant.
 // Used for vector search weighting.
 type Importance = number;
@@ -166,7 +197,7 @@ export class StringRAG<
     if (args.content) {
       contentArg = args.content;
     } else {
-      const embedResult = await embed({
+      const embedResult = await embedSafe({
         model: this.options.textEmbeddingModel,
         value: args.text,
       });
@@ -367,12 +398,12 @@ export class StringRAG<
       if (Array.isArray(args.query)) {
         embedding = args.query;
       } else {
-        const embedResult = await embed({
+        const embedResult = await embedSafe({
           model: this.options.textEmbeddingModel,
           value: args.query,
         });
         embedding = embedResult.embedding;
-        usage = embedResult.usage;
+        usage = embedResult.usage ?? { tokens: 0 };
       }
     }
 
