@@ -42,8 +42,6 @@ export const schema = defineSchema({
     importance: v.number(),
     filterValues: v.array(vNamedFilter),
     // To avoid re-creating/ updating the same entry
-    // This is a hash that ideally encompasses the content AND chunking strategy
-    // e.g. a hash of the list of chunk content hashes.
     contentHash: v.optional(v.string()),
     // conveneient metadata
     title: v.optional(v.string()),

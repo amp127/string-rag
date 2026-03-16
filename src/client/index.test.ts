@@ -275,20 +275,20 @@ describe("StringRAG thick client", () => {
 
       await addWithDummyContent(t, {
         key: "doc1",
-        text: "Important chunk content",
+        text: "Important content",
         namespace: "ellipsis-test",
         title: "Document",
       });
 
       const { text, entries } = await t.action(testApi.search, {
-        embedding: dummyEmbeddings("Important chunk"),
+        embedding: dummyEmbeddings("Important"),
         namespace: "ellipsis-test",
         limit: 2,
       });
 
       expect(entries).toHaveLength(1);
-      expect(entries[0].text).toBe("Important chunk content");
-      expect(text).toContain("Important chunk content");
+      expect(entries[0].text).toBe("Important content");
+      expect(text).toContain("Important content");
     });
 
     test("should format multiple entries with separators", async () => {
@@ -368,14 +368,14 @@ describe("StringRAG thick client", () => {
 
       await addWithDummyContent(t, {
         key: "title1-doc",
-        text: "Chunk 1 contents",
+        text: "Content 1",
         namespace: "readme-format-test",
         title: "Title 1",
       });
 
       await addWithDummyContent(t, {
         key: "title2-doc",
-        text: "Chunk 3 contents",
+        text: "Content 3",
         namespace: "readme-format-test",
         title: "Title 2",
       });
@@ -405,13 +405,13 @@ describe("StringRAG thick client", () => {
       expect(text).toBe(
         `## Title 1:
 
-Chunk 1 contents
+Content 1
 
 ---
 
 ## Title 2:
 
-Chunk 3 contents`,
+Content 3`,
       );
     });
   });

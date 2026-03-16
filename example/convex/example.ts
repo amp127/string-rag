@@ -62,7 +62,7 @@ export const addFile = action({
     const { entryId, created } = await rag.add(ctx, {
       // What search space to add this to. You cannot search across namespaces.
       namespace: globalNamespace ? "global" : userId,
-      // The text to embed. If you want to control chunking, pass `chunks` instead.
+      // The text to embed.
       text,
       /** The following fields are optional: */
       key: filename, // will replace any existing entry with the same key & namespace.

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.1
+
+- Changelog and dependency cleanup for 0.7.1 → 0.1.x conversion.
+- Removed unused `@langchain/textsplitters` devDependency.
+
+## 0.1.0
+
+- **Breaking:** Package simplified to a single content source per entry (no
+  chunking). One text/embedding per entry instead of multiple chunks.
+- Renamed main export from `RAG` to `StringRAG` (deprecated `RAG` alias
+  remains for backward compatibility).
+- Added `searchSimilar(ctx, { entryId, ... })` to find similar entries using
+  stored embeddings, without embedding a query string.
+- Removed chunk context and chunking from the API and docs; README and types
+  updated for the single-content-per-entry model.
+- Version reset to 0.1.x to reflect the simplified scope post-conversion from
+  0.7.1.
+
 ## 0.7.1
 
 - Adds hybrid text/vector search (credit:richardsolomou)

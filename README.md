@@ -1,22 +1,22 @@
-# Convex RAG Component
+# Convex StringRAG Component
 
 [![npm version](https://badge.fury.io/js/string-rag.svg)](https://badge.fury.io/js/string-rag)
 
 <!-- START: Include on https://convex.dev/components -->
 
 A component for semantic search, usually used to look up context for LLMs. Use
-with an Agent for Retrieval-Augmented Generation (RAG).
+with an Agent for Retrieval-Augmented Generation (RAG). One content per entry.
 
 [![Use AI to search HUGE amounts of text with the RAG Component](https://thumbs.video-to-markdown.com/1ff18153.jpg)](https://youtu.be/dGmtAmdAaFs)
 
 ## ✨ Key Features
 
-- **Add Content**: Add or replace content with text chunks and embeddings.
+- **Add Content**: Add or replace content with text and embeddings (one content
+  per entry).
 - **Semantic Search**: Vector-based search using configurable embedding models
 - **Namespaces**: Organize content into namespaces for per-user search.
 - **Custom Filtering**: Filter content with custom indexed fields.
 - **Importance Weighting**: Weight content by providing a 0 to 1 "importance".
-- **Chunk Context**: Get surrounding chunks for better context.
 - **Graceful Migrations**: Migrate content or whole namespaces without
   disruption.
 
@@ -58,8 +58,9 @@ const rag = new StringRAG(components.rag, {
 
 ## Add context to RAG
 
-Add content with text chunks. Each call to `add` will create a new **entry**. It
-will embed the chunks automatically if you don't provide them.
+Add content with text. Each call to `add` will create a new **entry** with a
+single content. The component will embed the text automatically if you don't
+provide an embedding.
 
 ```ts
 export const add = action({
@@ -74,17 +75,16 @@ export const add = action({
 });
 ```
 
-See below for how to chunk the text yourself or add content asynchronously, e.g.
-to handle large files.
+See below for adding content asynchronously, e.g. to handle large files.
 
 ## Semantic Search
 
 Search across content with vector similarity
 
 - `text` is a string with the full content of the results, for convenience. It
-  is in order of the entries, with titles at each entry boundary, and separators
-  between non-sequential chunks. See below for more details.
-- `results` is an array of matching chunks with scores and more metadata.
+  is in order of the entries, with titles at each entry boundary, and
+  separators between entries. See below for more details.
+- `results` is an array of matching content with scores and metadata.
 - `entries` is an array of the entries that matched the query. Each result has a
   `entryId` referencing one of these source entries.
 - `usage` contains embedding token usage information. Will be `{ tokens: 0 }` if
@@ -236,58 +236,13 @@ export const searchForNewsOrSports = action({
 });
 ```
 
-### Add surrounding chunks to results for context
-
-Instead of getting just the single matching chunk, you can request surrounding
-chunks so there's more context to the result.
-
-Note: If there are results that have overlapping ranges, it will not return
-duplicate chunks, but instead give priority to adding the "before" context to
-each chunk. For example if you requested 2 before and 1 after, and your results
-were for the same entryId indexes 1, 4, and 7, the results would be:
-
-```ts
-[
-  // Only one before chunk available, and leaves chunk2 for the next result.
-  { order: 1, content: [chunk0, chunk1], startOrder: 0, ... },
-  // 2 before chunks available, but leaves chunk5 for the next result.
-  { order: 4, content: [chunk2, chunk3, chunk4], startOrder: 2, ... },
-  // 2 before chunks available, and includes one after chunk.
-  { order: 7, content: [chunk5, chunk6, chunk7, chunk8], startOrder: 5, ... },
-]
-```
-
-```ts
-export const searchWithContext = action({
-  args: {
-    query: v.string(),
-    userId: v.string(),
-  },
-  handler: async (ctx, args) => {
-    const { results, text, entries, usage } = await rag.search(ctx, {
-      namespace: args.userId,
-      query: args.query,
-      chunkContext: { before: 2, after: 1 }, // Include 2 chunks before, 1 after
-      limit: 5,
-    });
-
-    return { results, text, entries, usage };
-  },
-});
-```
-
 <!-- END: Include on https://convex.dev/components -->
 
 ## Formatting results
 
-Formatting the results for use in a prompt depends a bit on the use case. By
-default, the results will be sorted by score, not necessarily in the order they
-appear in the original text. You may want to sort them by the order they appear
-in the original text so they follow the flow of the original document.
-
-For convenience, the `text` field of the search results is a string formatted
-with `...` separating non-sequential chunks, `---` separating entries, and
-`# Title:` at each entry boundary (if titles are available).
+By default, results are sorted by score. For convenience, the `text` field of
+the search results is a string formatted with `---` separating entries and
+`## Title:` at each entry boundary (if titles are available).
 
 ```ts
 const { text } = await rag.search(ctx, { ... });
@@ -296,66 +251,35 @@ console.log(text);
 
 ```txt
 ## Title 1:
-Chunk 1 contents
-Chunk 2 contents
-
-...
-
-Chunk 8 contents
-Chunk 9 contents
+Content from entry 1
 
 ---
 
 ## Title 2:
-Chunk 4 contents
-Chunk 5 contents
+Content from entry 2
 ```
 
-There is also a `text` field on each entry that is the full text of the entry,
-similarly formatted with `...` separating non-sequential chunks, if you want to
-format each entry differently.
-
-For a fully custom format, you can use the `results` field and entries directly:
+There is also a `text` field on each entry with the content for that entry. For
+a custom format, use the `results` and `entries` fields directly:
 
 ```ts
 const { results, text, entries } = await rag.search(ctx, {
   namespace: args.userId,
   query: args.query,
-  chunkContext: { before: 2, after: 1 }, // Include 2 chunks before, 1 after
   limit: 5,
-  vectorScoreThreshold: 0.5, // Only return results with a score >= 0.5
+  vectorScoreThreshold: 0.5,
 });
 
-// Get results in the order of the entries (highest score first)
-const contexts = entries
-  .map((e) => {
-    const ranges = results
-      .filter((r) => r.entryId === e.entryId)
-      .sort((a, b) => a.startOrder - b.startOrder);
-    let text = (e.title ?? "") + ":\n\n";
-    let previousEnd = 0;
-    for (const range of ranges) {
-      if (range.startOrder !== previousEnd) {
-        text += "\n...\n";
-      }
-      text += range.content.map((c) => c.text).join("\n");
-      previousEnd = range.startOrder + range.content.length;
-    }
-    return {
-      ...e,
-      entryId: e.entryId as EntryId,
-      filterValues: e.filterValues as EntryFilterValues<FitlerSchemas>[],
-      text,
-    };
-  })
-  .map((e) => (e.title ? `# ${e.title}:\n${e.text}` : e.text));
+const contexts = entries.map((e) =>
+  e.title ? `# ${e.title}:\n${e.text}` : e.text,
+);
 
 await generateText({
   model: openai.chat("gpt-4o-mini"),
   prompt:
     "Use the following context:\n\n" +
     contexts.join("\n---\n") +
-    "\n\n---\n\n Based on the context, answer the question:\n\n" +
+    "\n\n---\n\nBased on the context, answer the question:\n\n" +
     args.query,
 });
 ```
@@ -370,11 +294,10 @@ entry to replace the old one.
 await rag.add(ctx, { namespace: userId, key: "my-file.txt", text });
 ```
 
-When a new document is added, it will start with a status of "pending" while it
-chunks, embeds, and inserts the data into the database. Once all data is
-inserted, it will iterate over the chunks and swap the old content embeddings
-with the new ones, and then update the status to "ready", marking the previous
-version as "replaced".
+When a new entry is added, it will start with a status of "pending" while it
+embeds and inserts the content into the database. Once the content is inserted,
+it will swap the old content embedding with the new one and update the status to
+"ready", marking the previous version as "replaced".
 
 The old content is kept around by default, so in-flight searches will get
 results for old vector search results. See below for more details on deleting.
@@ -527,7 +450,7 @@ export const add = action({
     const { entryId } = await rag.add(ctx, {
       namespace: "global", // namespace can be any string
       key: url,
-      chunks: content.split("\n\n"),
+      text: content,
       filterValues: [
         { name: "category", value: category },
         { name: "contentType", value: contentType },
@@ -606,9 +529,9 @@ Types for the various elements:
 
 `Entry`, `EntryFilter`, `SearchEntry`, `SearchResult`
 
-- `SearchEntry` is an `Entry` with a `text` field including the combined search
-  results for that entry, whereas a `SearchResult` is a specific chunk result,
-  along with surrounding chunks.
+- `SearchEntry` is an `Entry` with a `text` field containing the content for that
+  entry, whereas a `SearchResult` is a single content result with score and
+  metadata.
 
 `EntryId`, `NamespaceId`
 

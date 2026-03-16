@@ -240,23 +240,21 @@ export class StringRAG<
   /**
    * Add an entry to the store asynchronously.
    *
-   * This is useful if you want to chunk the entry in a separate process,
-   * or if you want to chunk the entry in a separate process.
-   *
-   * The chunkerAction is a function that splits the entry into chunks and
-   * embeds them. It should be passed as internal.foo.myChunkerAction
+   * This is useful if you want to produce content in a separate process (e.g.
+   * fetch and embed text). The contentProcessor is a function that returns
+   * content for the entry. Pass as internal.foo.myContentProcessor
    * e.g.
    * ```ts
-   * export const myChunkerAction = rag.defineChunkerAction(async (ctx, args) => {
+   * export const myContentProcessor = rag.defineContentProcessor(async (ctx, args) => {
    *   // ...
-   *   return { chunks: [chunk1, chunk2, chunk3] };
+   *   return { content: await fetchAndEmbed(args.entry) };
    * });
    *
    * // in your mutation
    *   const entryId = await rag.addAsync(ctx, {
    *     key: "myfile.txt",
    *     namespace: "my-namespace",
-   *     chunkerAction: internal.foo.myChunkerAction,
+   *     contentProcessor: internal.foo.myContentProcessor,
    *   });
    * ```
    */
@@ -739,7 +737,7 @@ export class StringRAG<
   }
 
   /**
-   * Delete an entry and all its chunks (synchronously).
+   * Delete an entry and its content (synchronously).
    * If you are getting warnings about `ctx` not being compatible,
    * you're likely running this in a mutation.
    * Use `deleteAsync` or run `delete` in an action.
@@ -962,8 +960,8 @@ type EntryArgs<
   /**
    * This key allows replacing an existing entry by key.
    * Within a namespace, there will only be one "ready" entry per key.
-   * When adding a new one, it will start as "pending" and after all
-   * chunks are added, it will be promoted to "ready".
+   * When adding a new one, it will start as "pending" and after content
+   * is added, it will be promoted to "ready".
    */
   key?: string | undefined;
   /**
@@ -988,7 +986,7 @@ type EntryArgs<
   filterValues?: EntryFilter<FitlerSchemas>[];
   /**
    * The importance of the entry. This is used to scale the vector search
-   * score of each chunk.
+   * score of the content.
    */
   importance?: Importance;
   /**

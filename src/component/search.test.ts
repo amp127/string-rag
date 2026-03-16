@@ -85,11 +85,11 @@ describe("search", () => {
         entryId,
         content: {
           content: {
-            text: "Target chunk content",
+            text: "Target content",
             metadata: { target: true },
           },
           embedding: targetEmbedding,
-          searchableText: "Target chunk content",
+          searchableText: "Target content",
         },
       });
     });
@@ -105,7 +105,7 @@ describe("search", () => {
     expect(result.results).toHaveLength(1);
     expect(result.entries).toHaveLength(1);
     expect(result.entries[0].entryId).toBe(entryId);
-    expect(result.results[0].content.text).toBe("Target chunk content");
+    expect(result.results[0].content.text).toBe("Target content");
   });
 
   test("if the limit is 0, it returns nothing", async () => {
@@ -143,11 +143,11 @@ describe("search", () => {
         entryId,
         content: {
           content: {
-            text: "High similarity chunk",
+            text: "High similarity content",
             metadata: { similarity: "high" },
           },
           embedding: Array(128).fill(0.5),
-          searchableText: "High similarity chunk",
+          searchableText: "High similarity content",
         },
       });
     });
@@ -283,7 +283,7 @@ describe("search", () => {
       },
     ]);
 
-    // Insert chunks
+    // Insert content
     const baseEmbedding = Array(128).fill(0.1);
     const multiFilterContent = createTestContent("multi-filter doc", 0.1);
     await t.run(async (ctx) => {
@@ -603,7 +603,7 @@ describe("search", () => {
         textQuery: "quantum computing",
       });
 
-      // Each chunk should appear at most once in the results.
+      // Each result should appear at most once.
       const entryOrderPairs = result.results.map(
         (r) => `${r.entryId}:${r.order}`,
       );
@@ -621,9 +621,9 @@ describe("search", () => {
         await insertContent(ctx, {
           entryId,
           content: {
-            content: { text: "Target chunk", metadata: {} },
+            content: { text: "Target content", metadata: {} },
             embedding: targetEmbedding,
-            searchableText: "Target chunk",
+            searchableText: "Target content",
           },
         });
       });
@@ -637,7 +637,7 @@ describe("search", () => {
       });
 
       expect(result.results).toHaveLength(1);
-      expect(result.results[0].content.text).toBe("Target chunk");
+      expect(result.results[0].content.text).toBe("Target content");
     });
 
     test("textWeight and vectorWeight influence hybrid ranking", async () => {
