@@ -1,6 +1,6 @@
 # Convex RAG Component
 
-[![npm version](https://badge.fury.io/js/@convex-dev%2Frag.svg)](https://badge.fury.io/js/@convex-dev%2Frag)
+[![npm version](https://badge.fury.io/js/string-rag.svg)](https://badge.fury.io/js/string-rag)
 
 <!-- START: Include on https://convex.dev/components -->
 
@@ -21,7 +21,7 @@ with an Agent for Retrieval-Augmented Generation (RAG).
   disruption.
 
 Found a bug? Feature request?
-[File it here](https://github.com/get-convex/rag/issues).
+[File it here](https://github.com/amp127/string-rag/issues).
 
 ## Installation
 
@@ -31,7 +31,7 @@ component by calling `use`:
 ```ts
 // convex/convex.config.ts
 import { defineApp } from "convex/server";
-import rag from "@convex-dev/rag/convex.config.js";
+import rag from "string-rag/convex.config.js";
 
 const app = defineApp();
 app.use(rag);
@@ -46,7 +46,7 @@ Run `npx convex codegen` if `npx convex dev` isn't already running.
 ```ts
 // convex/example.ts
 import { components } from "./_generated/api";
-import { RAG } from "@convex-dev/rag";
+import { RAG } from "string-rag";
 // Any AI SDK model that supports embeddings will work.
 import { openai } from "@ai-sdk/openai";
 
@@ -157,7 +157,7 @@ you provide a filter with a more complex value, such as `categoryAndType` below.
 ```ts
 // convex/example.ts
 import { components } from "./_generated/api";
-import { RAG } from "@convex-dev/rag";
+import { RAG } from "string-rag";
 // Any AI SDK model that supports embeddings will work.
 import { openai } from "@ai-sdk/openai";
 
@@ -582,7 +582,7 @@ export default crons;
 ## Working with types
 
 You can use the provided types to validate and store data.
-`import { ... } from "@convex-dev/rag";`
+`import { ... } from "string-rag";`
 
 Types for the various elements:
 
@@ -618,7 +618,7 @@ are sorted by score, the best results show up near the top of both arrays and
 should be preferred over results higher in one but much lower in the other.
 
 ```ts
-import { hybridRank } from "@convex-dev/rag";
+import { hybridRank } from "string-rag";
 
 const textSearchResults = [id1, id2, id3];
 const vectorSearchResults = [id2, id3, id1];
@@ -659,7 +659,7 @@ Note: doing `blob.arrayBuffer()` will consume the blob's data, so you'll need to
 make a new blob to use it after calling this function.
 
 ```ts
-import { contentHashFromArrayBuffer } from "@convex-dev/rag";
+import { contentHashFromArrayBuffer } from "string-rag";
 
 export const addFile = action({
   args: { bytes: v.bytes() },
@@ -686,7 +686,7 @@ export const addFile = action({
 This guesses the mime type of a file from its extension.
 
 ```ts
-import { guessMimeTypeFromExtension } from "@convex-dev/rag";
+import { guessMimeTypeFromExtension } from "string-rag";
 
 const mimeType = guessMimeTypeFromExtension("my-file.mjs");
 console.log(mimeType); // "text/javascript"
@@ -697,7 +697,7 @@ console.log(mimeType); // "text/javascript"
 This guesses the mime type of a file from the first few bytes of its contents.
 
 ```ts
-import { guessMimeTypeFromContents } from "@convex-dev/rag";
+import { guessMimeTypeFromContents } from "string-rag";
 
 const mimeType = guessMimeTypeFromContents(await file.arrayBuffer());
 ```

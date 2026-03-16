@@ -2,7 +2,7 @@ import "./Example.css";
 import { useConvex } from "convex/react";
 import { api } from "../convex/_generated/api";
 import { useCallback, useState, useEffect } from "react";
-import type { EntryFilter, SearchResult, SearchType } from "@convex-dev/rag";
+import type { EntryFilter, SearchResult, SearchType } from "string-rag";
 import type { Filters, PublicFile } from "../convex/example";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import { UploadSection } from "./components/UploadSection";

@@ -1,13 +1,15 @@
 {
-  "name": "@convex-dev/rag",
-  "description": "A rag component for Convex.",
-  "repository": "github:get-convex/rag",
-  "homepage": "https://github.com/get-convex/rag#readme",
+  "name": "string-rag",
+  "description": "A RAG component for Convex.",
+  "repository": "github:amp127/string-rag",
+  "homepage": "https://github.com/amp127/string-rag#readme",
   "bugs": {
-    "email": "support@convex.dev",
-    "url": "https://github.com/get-convex/rag/issues"
+    "url": "https://github.com/amp127/string-rag/issues"
   },
   "version": "0.7.1",
+  "publishConfig": {
+    "access": "public"
+  },
   "license": "Apache-2.0",
   "keywords": [
     "convex",

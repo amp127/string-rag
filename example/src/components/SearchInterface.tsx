@@ -1,4 +1,4 @@
-import type { SearchType } from "@convex-dev/rag";
+import type { SearchType } from "string-rag";
 import { useState } from "react";
 
 type SearchScope = "general" | "category" | "file";

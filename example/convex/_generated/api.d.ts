@@ -53,5 +53,5 @@ export declare const internal: FilterApi<
 >;
 
 export declare const components: {
-  rag: import("@convex-dev/rag/_generated/component.js").ComponentApi<"rag">;
+  rag: import("string-rag/_generated/component.js").ComponentApi<"rag">;
 };

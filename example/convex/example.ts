@@ -10,7 +10,7 @@ import {
   SearchEntry,
   vEntryId,
   vSearchType,
-} from "@convex-dev/rag";
+} from "string-rag";
 import { assert } from "convex-helpers";
 import {
   paginationOptsValidator,
