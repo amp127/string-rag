@@ -20,10 +20,6 @@ interface SearchInterfaceProps {
   selectedDocument: any;
   limit: number;
   setLimit: (limit: number) => void;
-  chunksBefore: number;
-  setChunksBefore: (chunks: number) => void;
-  chunksAfter: number;
-  setChunksAfter: (chunks: number) => void;
   categories: string[];
   searchType: SearchType;
   setSearchType: (type: SearchType) => void;
@@ -45,10 +41,6 @@ export function SearchInterface({
   selectedDocument,
   limit,
   setLimit,
-  chunksBefore,
-  setChunksBefore,
-  chunksAfter,
-  setChunksAfter,
   categories,
   searchType,
   setSearchType,
@@ -292,7 +284,7 @@ export function SearchInterface({
                 ))}
               </div>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 gap-4">
               <div>
                 <label className="block text-sm font-semibold text-gray-700 mb-2">
                   Results Limit
@@ -305,36 +297,6 @@ export function SearchInterface({
                   }
                   min="1"
                   max="50"
-                  className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white text-sm"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-2">
-                  Context Before
-                </label>
-                <input
-                  type="number"
-                  value={chunksBefore}
-                  onChange={(e) =>
-                    setChunksBefore(Math.max(0, parseInt(e.target.value) || 0))
-                  }
-                  min="0"
-                  max="5"
-                  className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white text-sm"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-2">
-                  Context After
-                </label>
-                <input
-                  type="number"
-                  value={chunksAfter}
-                  onChange={(e) =>
-                    setChunksAfter(Math.max(0, parseInt(e.target.value) || 0))
-                  }
-                  min="0"
-                  max="5"
                   className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white text-sm"
                 />
               </div>

@@ -1,6 +1,5 @@
 import {
   embed,
-  embedMany,
   generateText,
   type EmbeddingModel,
   type EmbeddingModelUsage,
@@ -27,17 +26,15 @@ import { type Value } from "convex/values";
 import { ComponentApi } from "../component/_generated/component.js";
 import type { NamedFilter } from "../component/filters.js";
 import {
-  CHUNK_BATCH_SIZE,
   filterNamesContain,
   OnCompleteArgs,
-  vChunkerArgs,
+  vContentProcessorArgs,
   vEntryId,
   vNamespaceId,
   vOnCompleteArgs,
   vSearchType,
-  type Chunk,
-  type ChunkerAction,
-  type CreateChunkArgs,
+  type ContentProcessorAction,
+  type CreateContentArgs,
   type Entry,
   type EntryFilter,
   type EntryId,
@@ -50,12 +47,11 @@ import {
   type SearchType,
   type Status,
 } from "../shared.js";
-import { defaultChunker } from "./defaultChunker.js";
 
 export { hybridRank } from "./hybridRank.js";
-export { defaultChunker, vEntryId, vNamespaceId, vSearchType };
+export { vEntryId, vNamespaceId, vSearchType };
 export type {
-  ChunkerAction,
+  ContentProcessorAction,
   Entry,
   EntryId,
   NamespaceId,
@@ -121,9 +117,8 @@ export class RAG<
   ) {}
 
   /**
-   * Add an entry to the store. It will chunk the text with the `defaultChunker`
-   * if you don't provide chunks, and embed the chunks with the default model
-   * if you don't provide chunk embeddings.
+   * Add an entry to the store. The text is embedded with the default model
+   * and stored as a single content row.
    *
    * If you provide a key, it will replace an existing entry with the same key.
    * If you don't provide a key, it will always create a new entry.
@@ -136,24 +131,14 @@ export class RAG<
       EntryArgs<FitlerSchemas, EntryMetadata> &
       (
         | {
-            /**
-             * You can provide your own chunks to finely control the splitting.
-             * These can also include your own provided embeddings, so you can
-             * control what content is embedded, which can differ from the content
-             * in the chunks.
-             */
-            chunks: Iterable<InputChunk> | AsyncIterable<InputChunk>;
-            /** @deprecated You cannot specify both chunks and text currently. */
-            text?: undefined;
+            /** Text to embed and store. */
+            text: string;
+            content?: undefined;
           }
         | {
-            /**
-             * If you don't provide chunks, we will split the text into chunks
-             * using the default chunker and embed them with the default model.
-             */
-            text: string;
-            /** @deprecated You cannot specify both chunks and text currently. */
-            chunks?: undefined;
+            /** Pre-computed content with embedding (e.g. from your own embedder). */
+            content: CreateContentArgs;
+            text?: undefined;
           }
       ),
   ): Promise<{
@@ -176,16 +161,21 @@ export class RAG<
 
     validateAddFilterValues(args.filterValues, this.options.filterNames);
 
-    const chunks = args.chunks ?? defaultChunker(args.text);
-    let allChunks: CreateChunkArgs[] | undefined;
+    let contentArg: CreateContentArgs;
     const totalUsage: EmbeddingModelUsage = { tokens: 0 };
-    if (Array.isArray(chunks) && chunks.length < CHUNK_BATCH_SIZE) {
-      const result = await createChunkArgsBatch(
-        this.options.textEmbeddingModel,
-        chunks,
-      );
-      allChunks = result.chunks;
-      totalUsage.tokens += result.usage.tokens;
+    if (args.content) {
+      contentArg = args.content;
+    } else {
+      const embedResult = await embed({
+        model: this.options.textEmbeddingModel,
+        value: args.text,
+      });
+      totalUsage.tokens += embedResult.usage?.tokens ?? 0;
+      contentArg = {
+        content: { text: args.text },
+        embedding: embedResult.embedding,
+        searchableText: args.text,
+      };
     }
 
     const onComplete =
@@ -204,7 +194,7 @@ export class RAG<
           contentHash: args.contentHash,
         },
         onComplete,
-        allChunks,
+        content: contentArg,
       },
     );
     if (status === "ready") {
@@ -217,52 +207,20 @@ export class RAG<
       };
     }
 
-    let isPending = false;
-    if (allChunks) {
-      // If we added all the chunks and we're here, they're pending.
-      isPending = true;
-    } else {
-      // break chunks up into batches, respecting soft limit
-      let startOrder = 0;
-      for await (const batch of batchIterator(chunks, CHUNK_BATCH_SIZE)) {
-        const result = await createChunkArgsBatch(
-          this.options.textEmbeddingModel,
-          batch,
-        );
-        totalUsage.tokens += result.usage.tokens;
-        const { status } = await ctx.runMutation(this.component.chunks.insert, {
-          entryId,
-          startOrder,
-          chunks: result.chunks,
-        });
-        startOrder += result.chunks.length;
-        if (status === "pending") {
-          isPending = true;
-        }
-      }
+    const replaceResult = await ctx.runMutation(
+      this.component.content.replaceContent,
+      { entryId },
+    );
+    if (replaceResult.status === "replaced") {
+      return {
+        entryId: entryId as EntryId,
+        status: "replaced" as const,
+        created: false,
+        replacedEntry: null,
+        usage: totalUsage,
+      };
     }
-    if (isPending) {
-      let startOrder = 0;
-      // replace any older version of the entry with the new one
-      while (true) {
-        const { status, nextStartOrder } = await ctx.runMutation(
-          this.component.chunks.replaceChunksPage,
-          { entryId, startOrder },
-        );
-        if (status === "ready") {
-          break;
-        } else if (status === "replaced") {
-          return {
-            entryId: entryId as EntryId,
-            status: "replaced" as const,
-            created: false,
-            replacedEntry: null,
-            usage: totalUsage,
-          };
-        }
-        startOrder = nextStartOrder;
-      }
-    }
+
     const promoted = await ctx.runMutation(
       this.component.entries.promoteToReady,
       { entryId },
@@ -307,20 +265,17 @@ export class RAG<
     args: NamespaceSelection &
       EntryArgs<FitlerSchemas, EntryMetadata> & {
         /**
-         * A function that splits the entry into chunks and embeds them.
-         * This should be passed as internal.foo.myChunkerAction
+         * A function that produces content for the entry (e.g. fetches and embeds text).
+         * Pass as internal.foo.myContentProcessor
          * e.g.
          * ```ts
-         * export const myChunkerAction = rag.defineChunkerAction();
-         *
-         * // in your mutation
-         *   const entryId = await rag.addAsync(ctx, {
-         *     key: "myfile.txt",
-         *     namespace: "my-namespace",
-         *     chunker: internal.foo.myChunkerAction,
-         *   });
+         * export const myContentProcessor = rag.defineContentProcessor(async (ctx, args) => {
+         *   return { content: await fetchAndEmbed(args.entry) };
+         * });
+         * await rag.addAsync(ctx, { key: "doc", namespace: "ns", contentProcessor: internal.foo.myContentProcessor });
+         * ```
          */
-        chunkerAction: ChunkerAction;
+        contentProcessor: ContentProcessorAction;
       },
   ): Promise<{ entryId: EntryId; status: "ready" | "pending" }> {
     let namespaceId: NamespaceId;
@@ -339,7 +294,7 @@ export class RAG<
     const onComplete = args.onComplete
       ? await createFunctionHandle(args.onComplete)
       : undefined;
-    const chunker = await createFunctionHandle(args.chunkerAction);
+    const contentProcessor = await createFunctionHandle(args.contentProcessor);
 
     const { entryId, status } = await ctx.runMutation(
       this.component.entries.addAsync,
@@ -354,7 +309,7 @@ export class RAG<
           contentHash: args.contentHash,
         },
         onComplete,
-        chunker,
+        contentProcessor,
       },
     );
     return { entryId: entryId as EntryId, status };
@@ -389,7 +344,6 @@ export class RAG<
       namespace,
       filters = [],
       limit = DEFAULT_SEARCH_LIMIT,
-      chunkContext = { before: 0, after: 0 },
       vectorScoreThreshold,
       searchType = "vector",
       textWeight,
@@ -437,29 +391,14 @@ export class RAG<
         filters,
         limit,
         vectorScoreThreshold,
-        chunkContext,
         textQuery,
         textWeight,
         vectorWeight,
       },
     );
     const entriesWithTexts = entries.map((e) => {
-      const ranges = results
-        .filter((r) => r.entryId === e.entryId)
-        .sort((a, b) => a.startOrder - b.startOrder);
-      let text = "";
-      let previousEnd = 0;
-      for (const range of ranges) {
-        if (previousEnd !== 0) {
-          if (range.startOrder !== previousEnd) {
-            text += "\n\n...\n\n";
-          } else {
-            text += "\n";
-          }
-        }
-        text += range.content.map((c) => c.text).join("\n");
-        previousEnd = range.startOrder + range.content.length;
-      }
+      const entryResults = results.filter((r) => r.entryId === e.entryId);
+      const text = entryResults.map((r) => r.content.text).join("\n");
       return { ...e, text } as SearchEntry<FitlerSchemas, EntryMetadata>;
     });
 
@@ -470,6 +409,59 @@ export class RAG<
         .join(`\n\n---\n\n`),
       entries: entriesWithTexts,
       usage,
+    };
+  }
+
+  /**
+   * Search for entries similar to a given entry, using its stored embedding
+   * vector directly. More efficient than `search` when you have an existing
+   * entry, as it skips the embedding model API call entirely.
+   *
+   * Searches within the entry's own namespace using vector similarity only.
+   * The source entry is automatically excluded from results.
+   */
+  async searchSimilar(
+    ctx: CtxWith<"runAction">,
+    args: {
+      /** The entry to find similar entries for. */
+      entryId: EntryId;
+    } & Pick<
+      SearchOptions<FitlerSchemas>,
+      "filters" | "limit" | "vectorScoreThreshold"
+    >,
+  ): Promise<{
+    results: SearchResult[];
+    text: string;
+    entries: SearchEntry<FitlerSchemas, EntryMetadata>[];
+  }> {
+    const {
+      entryId,
+      filters = [],
+      limit = DEFAULT_SEARCH_LIMIT,
+      vectorScoreThreshold,
+    } = args;
+
+    const { results, entries } = await ctx.runAction(
+      this.component.search.searchSimilar,
+      {
+        entryId,
+        filters,
+        limit,
+        vectorScoreThreshold,
+      },
+    );
+    const entriesWithTexts = entries.map((e) => {
+      const entryResults = results.filter((r) => r.entryId === e.entryId);
+      const text = entryResults.map((r) => r.content.text).join("\n");
+      return { ...e, text } as SearchEntry<FitlerSchemas, EntryMetadata>;
+    });
+
+    return {
+      results: results as SearchResult[],
+      text: entriesWithTexts
+        .map((e) => (e.title ? `## ${e.title}:\n\n${e.text}` : e.text))
+        .join(`\n\n---\n\n`),
+      entries: entriesWithTexts,
     };
   }
 
@@ -549,7 +541,17 @@ export class RAG<
       case "google":
         userQuestionHeader = "<question>";
         userQuestionFooter = "</question>";
-      // fallthrough
+        contextHeader = "<context>";
+        contextContents = context.entries
+          .map((e) =>
+            e.title
+              ? `<document title="${e.title}">${e.text}</document>`
+              : `<document>${e.text}</document>`,
+          )
+          .join("\n");
+        contextFooter = "</context>";
+        userPrompt = prompt.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        break;
       case "anthropic":
         contextHeader = "<context>";
         contextContents = context.entries
@@ -728,25 +730,7 @@ export class RAG<
   }
 
   /**
-   * List all chunks for an entry, paginated.
-   */
-  async listChunks(
-    ctx: CtxWith<"runQuery">,
-    args: {
-      paginationOpts: PaginationOptions;
-      entryId: EntryId;
-      order?: "desc" | "asc";
-    },
-  ): Promise<PaginationResult<Chunk>> {
-    return ctx.runQuery(this.component.chunks.list, {
-      entryId: args.entryId,
-      paginationOpts: args.paginationOpts,
-      order: args.order ?? "asc",
-    });
-  }
-
-  /**
-   * Delete an entry and all its chunks in the background using a workpool.
+   * Delete an entry and its content in the background using a workpool.
    */
   async deleteAsync(ctx: CtxWith<"runMutation">, args: { entryId: EntryId }) {
     await ctx.runMutation(this.component.entries.deleteAsync, {
@@ -784,7 +768,6 @@ export class RAG<
       );
       await ctx.runMutation(this.component.entries.deleteAsync, {
         entryId: args.entryId,
-        startOrder: 0,
       });
     }
   }
@@ -847,52 +830,39 @@ export class RAG<
   }
 
   /**
-   * Define a function that can be provided to the `chunkerAction` parameter of
-   * `addAsync` like:
-   * ```ts
-   * const chunkerAction = rag.defineChunkerAction(async (ctx, args) => {
-   *   // ...
-   * });
-   *
-   * // in your mutation
-   *   const entryId = await rag.addAsync(ctx, {
-   *     key: "myfile.txt",
-   *     namespace: "my-namespace",
-   *     chunkerAction: internal.foo.myChunkerAction,
-   *   });
-   * ```
-   * It will be called when the entry is added, or when the entry is replaced
-   * along the way.
+   * Define a function that can be provided to the `contentProcessor` parameter of
+   * `addAsync`. It should produce content (e.g. fetch and embed text) and will
+   * be called when the entry is added.
    */
-  defineChunkerAction<DataModel extends GenericDataModel>(
+  defineContentProcessor<DataModel extends GenericDataModel>(
     fn: (
       ctx: GenericActionCtx<DataModel>,
       args: {
         namespace: Namespace;
         entry: Entry<FitlerSchemas, EntryMetadata>;
       },
-    ) => AsyncIterable<InputChunk> | Promise<{ chunks: InputChunk[] }>,
+    ) => Promise<{ content: CreateContentArgs }>,
   ): RegisteredAction<
     "internal",
-    FunctionArgs<ChunkerAction>,
-    FunctionReturnType<ChunkerAction>
+    FunctionArgs<ContentProcessorAction>,
+    FunctionReturnType<ContentProcessorAction>
   > {
     return internalActionGeneric({
-      args: vChunkerArgs,
+      args: vContentProcessorArgs,
       handler: async (ctx, args) => {
         const { namespace, entry } = args;
         const modelId = getModelId(this.options.textEmbeddingModel);
         if (namespace.modelId !== modelId) {
           console.error(
             `You are using a different embedding model ${modelId} for asynchronously ` +
-              `generating chunks than the one provided when it was started: ${namespace.modelId}`,
+              `generating content than the one provided when it was started: ${namespace.modelId}`,
           );
           return;
         }
         if (namespace.dimension !== this.options.embeddingDimension) {
           console.error(
             `You are using a different embedding dimension ${this.options.embeddingDimension} for asynchronously ` +
-              `generating chunks than the one provided when it was started: ${namespace.dimension}`,
+              `generating content than the one provided when it was started: ${namespace.dimension}`,
           );
           return;
         }
@@ -903,68 +873,28 @@ export class RAG<
           )
         ) {
           console.error(
-            `You are using a different filters (${this.options.filterNames?.join(", ")}) for asynchronously ` +
-              `generating chunks than the one provided when it was started: ${namespace.filterNames.join(", ")}`,
+            `You are using different filters (${this.options.filterNames?.join(", ")}) for asynchronously ` +
+              `generating content than the one provided when it was started: ${namespace.filterNames.join(", ")}`,
           );
           return;
         }
-        const chunksPromise = fn(ctx, {
+        const { content } = await fn(ctx, {
           namespace,
           entry: entry as Entry<FitlerSchemas, EntryMetadata>,
         });
-        let chunkIterator: AsyncIterable<InputChunk>;
-        if (chunksPromise instanceof Promise) {
-          const chunks = await chunksPromise;
-          chunkIterator = {
-            [Symbol.asyncIterator]: async function* () {
-              yield* chunks.chunks;
-            },
-          };
-        } else {
-          chunkIterator = chunksPromise;
-        }
-        let batchOrder = 0;
-        for await (const batch of batchIterator(
-          chunkIterator,
-          CHUNK_BATCH_SIZE,
-        )) {
-          const result = await createChunkArgsBatch(
-            this.options.textEmbeddingModel,
-            batch,
-          );
-          await ctx.runMutation(
-            args.insertChunks as FunctionHandle<
-              "mutation",
-              FunctionArgs<ComponentApi["chunks"]["insert"]>,
-              null
-            >,
-            {
-              entryId: entry.entryId,
-              startOrder: batchOrder,
-              chunks: result.chunks,
-            },
-          );
-          batchOrder += result.chunks.length;
-        }
+        await ctx.runMutation(
+          args.insertContent as FunctionHandle<
+            "mutation",
+            FunctionArgs<ComponentApi["content"]["insert"]>,
+            null
+          >,
+          {
+            entryId: entry.entryId,
+            content,
+          },
+        );
       },
     });
-  }
-}
-
-async function* batchIterator<T>(
-  iterator: Iterable<T> | AsyncIterable<T>,
-  batchSize: number,
-): AsyncIterable<T[]> {
-  let batch: T[] = [];
-  for await (const item of iterator) {
-    batch.push(item);
-    if (batch.length >= batchSize) {
-      yield batch;
-      batch = [];
-    }
-  }
-  if (batch.length > 0) {
-    yield batch;
   }
 }
 
@@ -997,97 +927,6 @@ function validateAddFilterValues(
     }
   }
 }
-
-function makeBatches<T>(items: T[], batchSize: number): T[][] {
-  const batches: T[][] = [];
-  for (let i = 0; i < items.length; i += batchSize) {
-    batches.push(items.slice(i, i + batchSize));
-  }
-  return batches;
-}
-
-async function createChunkArgsBatch(
-  embedModel: EmbeddingModel,
-  chunks: InputChunk[],
-): Promise<{ chunks: CreateChunkArgs[]; usage: EmbeddingModelUsage }> {
-  const argsMaybeMissingEmbeddings: (Omit<CreateChunkArgs, "embedding"> & {
-    embedding?: number[];
-  })[] = chunks.map((chunk) => {
-    if (typeof chunk === "string") {
-      return { content: { text: chunk }, searchableText: chunk };
-    } else if ("text" in chunk) {
-      const { text, metadata, keywords: searchableText } = chunk;
-      return {
-        content: { text, metadata },
-        embedding: chunk.embedding,
-        searchableText: searchableText ?? text,
-      };
-    } else if ("pageContent" in chunk) {
-      const { pageContent: text, metadata, keywords: searchableText } = chunk;
-      return {
-        content: { text, metadata },
-        embedding: chunk.embedding,
-        searchableText: searchableText ?? text,
-      };
-    } else {
-      throw new Error("Invalid chunk: " + JSON.stringify(chunk));
-    }
-  });
-  const missingEmbeddingsWithIndex = argsMaybeMissingEmbeddings
-    .map((arg, index) =>
-      arg.embedding
-        ? null
-        : {
-            text: arg.content.text,
-            index,
-          },
-    )
-    .filter((b) => b !== null);
-  const totalUsage: EmbeddingModelUsage = { tokens: 0 };
-  for (const batch of makeBatches(missingEmbeddingsWithIndex, 100)) {
-    const { embeddings, usage } = await embedMany({
-      model: embedModel,
-      values: batch.map((b) => b.text.trim() || "<empty>"),
-    });
-    totalUsage.tokens += usage.tokens;
-    for (const [index, embedding] of embeddings.entries()) {
-      argsMaybeMissingEmbeddings[batch[index].index].embedding = embedding;
-    }
-  }
-  const finalChunks = argsMaybeMissingEmbeddings.filter((a) => {
-    if (a.embedding === undefined) {
-      throw new Error("Embedding is undefined for chunk " + a.content.text);
-    }
-    return true;
-  }) as CreateChunkArgs[];
-  return { chunks: finalChunks, usage: totalUsage };
-}
-
-type MastraChunk = {
-  text: string;
-  metadata?: Record<string, Value>;
-  embedding?: Array<number>;
-};
-
-type LangChainChunk = {
-  id?: string;
-  pageContent: string;
-  metadata?: Record<string, Value>; //{ loc: { lines: { from: number; to: number } } };
-  embedding?: Array<number>;
-};
-
-export type InputChunk =
-  | string
-  | ((MastraChunk | LangChainChunk) & {
-      /**
-       * Text to use for full-text search. Defaults to the chunk's text content.
-       * Provide a custom value to control what text is searchable.
-       */
-      keywords?: string;
-      // In the future we can add per-chunk metadata if it's useful.
-      // importance?: Importance;
-      // filters?: EntryFilterValues<FitlerSchemas>[];
-    });
 
 type FilterNames<FiltersSchemas extends Record<string, Value>> =
   (keyof FiltersSchemas & string)[];
@@ -1178,25 +1017,9 @@ type SearchOptions<FitlerSchemas extends Record<string, Value>> = {
    */
   filters?: EntryFilter<FitlerSchemas>[];
   /**
-   * The maximum number of messages to fetch. Default is 10.
-   * This is the number *before* the chunkContext is applied.
-   * e.g. { before: 2, after: 1 } means 4x the limit is returned.
+   * The maximum number of results to fetch. Default is 10.
    */
   limit?: number;
-  /**
-   * What chunks around the search results to include.
-   * Default: { before: 0, after: 0 }
-   * e.g. { before: 2, after: 1 } means 2 chunks before + 1 chunk after.
-   * If `chunk4` was the only result, the results returned would be:
-   * `[{ content: [chunk2, chunk3, chunk4, chunk5], score, ... }]`
-   * The results don't overlap, and bias toward giving "before" context.
-   * So if `chunk7` was also a result, the results returned would be:
-   * `[
-   *   { content: [chunk2, chunk3, chunk4], score, ... }
-   *   { content: [chunk5, chunk6, chunk7, chunk8], score, ... },
-   * ]`
-   */
-  chunkContext?: { before: number; after: number };
   /**
    * The minimum score to return a result.
    */
@@ -1276,7 +1099,8 @@ export function getModelId(embeddingModel: ModelOrMetadata): string {
 
 export function getProviderName(embeddingModel: ModelOrMetadata): string {
   if (typeof embeddingModel === "string") {
-    return embeddingModel.split("/").at(0)!;
+    const part = embeddingModel.split("/").at(0);
+    return part ?? embeddingModel;
   }
   return embeddingModel.provider;
 }

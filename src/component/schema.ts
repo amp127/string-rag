@@ -58,9 +58,10 @@ export const schema = defineSchema({
     ])
     // To look up most recently changed entries
     .index("status_namespaceId", ["status.kind", "namespaceId"]),
-  chunks: defineTable({
+  content: defineTable({
     entryId: v.id("entries"),
-    order: v.number(),
+    text: v.string(),
+    metadata: v.optional(v.record(v.string(), v.any())),
     state: v.union(
       v.object({
         kind: v.literal("pending"),
@@ -80,21 +81,14 @@ export const schema = defineSchema({
         pendingSearchableText: v.optional(v.string()),
       }),
     ),
-    // TODO: should content be inline?
-    contentId: v.id("content"),
     ...vAllFilterFields,
   })
-    .index("entryId_order", ["entryId", "order"])
+    .index("entryId", ["entryId"])
     .index("embeddingId", ["state.embeddingId"])
     .searchIndex("searchableText", {
       searchField: "state.searchableText",
       filterFields: allFilterFieldNames,
     }),
-  content: defineTable({
-    text: v.string(),
-    // convenient metadata
-    metadata: v.optional(v.record(v.string(), v.any())),
-  }),
 
   ...embeddingsTables,
 });

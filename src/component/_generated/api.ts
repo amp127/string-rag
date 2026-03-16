@@ -8,7 +8,7 @@
  * @module
  */
 
-import type * as chunks from "../chunks.js";
+import type * as content from "../content.js";
 import type * as embeddings_importance from "../embeddings/importance.js";
 import type * as embeddings_index from "../embeddings/index.js";
 import type * as embeddings_tables from "../embeddings/tables.js";
@@ -25,7 +25,7 @@ import type {
 import { anyApi, componentsGeneric } from "convex/server";
 
 const fullApi: ApiFromModules<{
-  chunks: typeof chunks;
+  content: typeof content;
   "embeddings/importance": typeof embeddings_importance;
   "embeddings/index": typeof embeddings_index;
   "embeddings/tables": typeof embeddings_tables;

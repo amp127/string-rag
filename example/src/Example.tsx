@@ -1,6 +1,5 @@
 import "./Example.css";
 import { useConvex } from "convex/react";
-import { usePaginatedQuery } from "convex-helpers/react";
 import { api } from "../convex/_generated/api";
 import { useCallback, useState, useEffect } from "react";
 import type { EntryFilter, SearchResult, SearchType } from "@convex-dev/rag";
@@ -49,24 +48,11 @@ function Example() {
 
   // New state for search parameters
   const [limit, setLimit] = useState(10);
-  const [chunksBefore, setChunksBefore] = useState(1);
-  const [chunksAfter, setChunksAfter] = useState(1);
   const [categories, setCategories] = useState<string[]>([]);
   const [searchType, setSearchType] = useState<SearchType>("vector");
 
   // Convex functions
   const convex = useConvex();
-
-  const documentChunks = usePaginatedQuery(
-    api.example.listChunks,
-    selectedDocument?.entryId
-      ? {
-          entryId: selectedDocument.entryId,
-          order: "asc",
-        }
-      : "skip",
-    { initialNumItems: 10 },
-  );
 
   const handleSearch = useCallback(
     async (mode: QueryMode) => {
@@ -87,8 +73,6 @@ function Example() {
       setQuestionResult(null);
 
       try {
-        const chunkContext = { before: chunksBefore, after: chunksAfter };
-
         if (mode === "question") {
           let filter: EntryFilter<Filters> | undefined;
 
@@ -118,7 +102,6 @@ function Example() {
             globalNamespace: globalNamespace || false,
             filter,
             limit,
-            chunkContext,
             searchType,
           });
 
@@ -151,7 +134,6 @@ function Example() {
                 query: searchQuery,
                 globalNamespace: searchGlobal,
                 limit,
-                chunkContext,
                 searchType,
               });
               break;
@@ -161,7 +143,6 @@ function Example() {
                 globalNamespace: categorySearchGlobal,
                 category: selectedCategory,
                 limit,
-                chunkContext,
                 searchType,
               });
               break;
@@ -171,7 +152,6 @@ function Example() {
                 globalNamespace: selectedDocument!.global || false,
                 filename: selectedDocument!.filename || "",
                 limit,
-                chunkContext,
                 searchType,
               });
               break;
@@ -205,8 +185,6 @@ function Example() {
       convex,
       categorySearchGlobal,
       limit,
-      chunksBefore,
-      chunksAfter,
       searchType,
     ],
   );
@@ -266,10 +244,6 @@ function Example() {
           selectedDocument={selectedDocument}
           limit={limit}
           setLimit={setLimit}
-          chunksBefore={chunksBefore}
-          setChunksBefore={setChunksBefore}
-          chunksAfter={chunksAfter}
-          setChunksAfter={setChunksAfter}
           categories={categories}
           searchType={searchType}
           setSearchType={setSearchType}
@@ -299,11 +273,11 @@ function Example() {
             </div>
           )}
 
-          {/* Document Chunks for File queries */}
+          {/* Selected document for File scope */}
           {searchScope === "file" &&
             selectedDocument &&
-            documentChunks.status !== "LoadingFirstPage" &&
-            !searchResults && (
+            !searchResults &&
+            !questionResult && (
               <div className="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-2xl border border-blue-200 p-6 h-full shadow-lg">
                 <div className="flex items-center space-x-3 mb-6">
                   <div className="w-10 h-10 bg-gradient-to-r from-blue-600 to-indigo-600 rounded-xl flex items-center justify-center shadow-lg">
@@ -322,7 +296,7 @@ function Example() {
                     </svg>
                   </div>
                   <h3 className="text-xl font-bold text-blue-900">
-                    Document Chunks ({documentChunks.results.length || 0})
+                    Selected document
                   </h3>
                 </div>
                 {selectedDocument.url && (
@@ -362,51 +336,9 @@ function Example() {
                     )}
                   </div>
                 )}
-                <div
-                  className="overflow-y-auto space-y-4"
-                  style={{ height: "calc(100% - 8rem)" }}
-                >
-                  {documentChunks.results.map((chunk) => (
-                    <div
-                      key={chunk.order}
-                      className="flex items-start space-x-4 group"
-                    >
-                      <div className="flex-shrink-0 w-8 h-8 bg-gradient-to-r from-blue-500 to-indigo-500 rounded-lg flex items-center justify-center text-white text-xs font-bold shadow-md">
-                        {chunk.order}
-                      </div>
-                      <div className="flex-1 bg-white/80 backdrop-blur-sm p-4 rounded-xl border border-gray-200/50 shadow-sm group-hover:shadow-md transition-all duration-200">
-                        <div className="text-sm text-gray-900 leading-relaxed font-medium">
-                          {chunk.text}
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                  {documentChunks.status === "CanLoadMore" && (
-                    <div className="flex justify-center mt-6">
-                      <button
-                        onClick={() => documentChunks.loadMore(10)}
-                        className="px-6 py-3 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-xl font-semibold hover:from-blue-700 hover:to-indigo-700 shadow-lg hover:shadow-xl transition-all duration-300"
-                      >
-                        <div className="flex items-center space-x-2">
-                          <svg
-                            className="w-4 h-4"
-                            fill="none"
-                            stroke="currentColor"
-                            viewBox="0 0 24 24"
-                          >
-                            <path
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              strokeWidth="2"
-                              d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-                            />
-                          </svg>
-                          <span>Load More</span>
-                        </div>
-                      </button>
-                    </div>
-                  )}
-                </div>
+                <p className="text-sm text-blue-800/80">
+                  Run a file search above to find content in this document.
+                </p>
               </div>
             )}
 

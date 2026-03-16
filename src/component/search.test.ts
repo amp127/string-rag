@@ -5,7 +5,7 @@ import { convexTest, type TestConvex } from "convex-test";
 import schema from "./schema.js";
 import { api, internal } from "./_generated/api.js";
 import { modules } from "./setup.test.js";
-import { insertChunks } from "./chunks.js";
+import { insertContent } from "./content.js";
 import type { Id } from "./_generated/dataModel.js";
 import type { Value } from "convex/values";
 
@@ -50,14 +50,12 @@ describe("search", () => {
     });
   }
 
-  function createTestChunks(count = 3, baseEmbedding = 0.1) {
-    return Array.from({ length: count }, (_, i) => ({
-      content: {
-        text: `Test chunk content ${i + 1}`,
-        metadata: { index: i },
-      },
-      embedding: [...Array(127).fill(0.01), baseEmbedding + i * 0.01],
-    }));
+  function createTestContent(text = "Test content", baseEmbedding = 0.1) {
+    return {
+      content: { text, metadata: {} },
+      embedding: Array(128).fill(baseEmbedding),
+      searchableText: text,
+    };
   }
 
   test("if a namespace doesn't exist yet, returns nothing", async () => {
@@ -81,34 +79,21 @@ describe("search", () => {
     const namespaceId = await setupTestNamespace(t);
     const entryId = await setupTestEntry(t, namespaceId);
 
-    // Insert chunks with specific embeddings
-    const targetEmbedding = [...Array(127).fill(0.5), 1];
-    const chunks = [
-      {
-        content: {
-          text: "Target chunk content",
-          metadata: { target: true },
-        },
-        embedding: targetEmbedding,
-      },
-      {
-        content: {
-          text: "Other chunk content",
-          metadata: { target: false },
-        },
-        embedding: [...Array(127).fill(0.1), 0], // Different embedding
-      },
-    ];
-
+    const targetEmbedding = Array(128).fill(0.5);
     await t.run(async (ctx) => {
-      await insertChunks(ctx, {
+      await insertContent(ctx, {
         entryId,
-        startOrder: 0,
-        chunks,
+        content: {
+          content: {
+            text: "Target chunk content",
+            metadata: { target: true },
+          },
+          embedding: targetEmbedding,
+          searchableText: "Target chunk content",
+        },
       });
     });
 
-    // Search with the exact target embedding
     const result = await t.action(api.search.search, {
       namespace: "test-namespace",
       embedding: targetEmbedding,
@@ -117,13 +102,10 @@ describe("search", () => {
       limit: 10,
     });
 
-    expect(result.results).toHaveLength(2);
+    expect(result.results).toHaveLength(1);
     expect(result.entries).toHaveLength(1);
     expect(result.entries[0].entryId).toBe(entryId);
-
-    // The target chunk should have a higher score (first result)
-    expect(result.results[0].score).toBeGreaterThan(result.results[1].score);
-    expect(result.results[0].content[0].text).toBe("Target chunk content");
+    expect(result.results[0].content.text).toBe("Target chunk content");
   });
 
   test("if the limit is 0, it returns nothing", async () => {
@@ -131,13 +113,10 @@ describe("search", () => {
     const namespaceId = await setupTestNamespace(t);
     const entryId = await setupTestEntry(t, namespaceId);
 
-    // Insert chunks
-    const chunks = createTestChunks(3);
     await t.run(async (ctx) => {
-      await insertChunks(ctx, {
+      await insertContent(ctx, {
         entryId,
-        startOrder: 0,
-        chunks,
+        content: createTestContent("Test content", 0.1),
       });
     });
 
@@ -159,29 +138,17 @@ describe("search", () => {
     const namespaceId = await setupTestNamespace(t);
     const entryId = await setupTestEntry(t, namespaceId);
 
-    // Insert chunks with different embeddings (to get different scores)
-    const chunks = [
-      {
-        content: {
-          text: "High similarity chunk",
-          metadata: { similarity: "high" },
-        },
-        embedding: Array(128).fill(0.5), // Very similar to search embedding
-      },
-      {
-        content: {
-          text: "Low similarity chunk",
-          metadata: { similarity: "low" },
-        },
-        embedding: Array(128).fill(0.0), // Very different from search embedding
-      },
-    ];
-
     await t.run(async (ctx) => {
-      await insertChunks(ctx, {
+      await insertContent(ctx, {
         entryId,
-        startOrder: 0,
-        chunks,
+        content: {
+          content: {
+            text: "High similarity chunk",
+            metadata: { similarity: "high" },
+          },
+          embedding: Array(128).fill(0.5),
+          searchableText: "High similarity chunk",
+        },
       });
     });
 
@@ -205,11 +172,11 @@ describe("search", () => {
       limit: 10,
     });
 
-    // With threshold should return fewer results
-    expect(resultWithThreshold.results.length).toBeLessThan(
+    // With threshold may return fewer results
+    expect(resultWithThreshold.results.length).toBeLessThanOrEqual(
       resultWithoutThreshold.results.length,
     );
-    expect(resultWithoutThreshold.results).toHaveLength(2);
+    expect(resultWithoutThreshold.results).toHaveLength(1);
 
     // All results with threshold should have score >= threshold
     for (const result of resultWithThreshold.results) {
@@ -236,27 +203,14 @@ describe("search", () => {
       { name: "category", value: "category1" },
     ]);
 
-    // Insert chunks in all entries
     const baseEmbedding = Array(128).fill(0.1);
+    const testContent = createTestContent("doc content", 0.1);
     await t.run(async (ctx) => {
-      await insertChunks(ctx, {
-        entryId: doc1Id,
-        startOrder: 0,
-        chunks: createTestChunks(2, 0.1),
-      });
-      await insertChunks(ctx, {
-        entryId: doc2Id,
-        startOrder: 0,
-        chunks: createTestChunks(2, 0.1),
-      });
-      await insertChunks(ctx, {
-        entryId: doc3Id,
-        startOrder: 0,
-        chunks: createTestChunks(2, 0.1),
-      });
+      await insertContent(ctx, { entryId: doc1Id, content: testContent });
+      await insertContent(ctx, { entryId: doc2Id, content: testContent });
+      await insertContent(ctx, { entryId: doc3Id, content: testContent });
     });
 
-    // Search for category1 only
     const category1Results = await t.action(api.search.search, {
       namespace: "filtered-namespace",
       embedding: baseEmbedding,
@@ -266,12 +220,11 @@ describe("search", () => {
     });
 
     expect(category1Results.entries).toHaveLength(2); // doc1 and doc3
-    expect(category1Results.results).toHaveLength(4); // 2 chunks each from doc1 and doc3
+    expect(category1Results.results).toHaveLength(2);
 
     const entryIds = category1Results.entries.map((d) => d.entryId).sort();
     expect(entryIds).toEqual([doc1Id, doc3Id].sort());
 
-    // Search for category2 only
     const category2Results = await t.action(api.search.search, {
       namespace: "filtered-namespace",
       embedding: baseEmbedding,
@@ -281,10 +234,9 @@ describe("search", () => {
     });
 
     expect(category2Results.entries).toHaveLength(1); // only doc2
-    expect(category2Results.results).toHaveLength(2); // 2 chunks from doc2
+    expect(category2Results.results).toHaveLength(1);
     expect(category2Results.entries[0].entryId).toBe(doc2Id);
 
-    // Search with no filters should return all
     const noFilterResults = await t.action(api.search.search, {
       namespace: "filtered-namespace",
       embedding: baseEmbedding,
@@ -293,8 +245,8 @@ describe("search", () => {
       limit: 10,
     });
 
-    expect(noFilterResults.entries).toHaveLength(3); // all entries
-    expect(noFilterResults.results).toHaveLength(6); // all chunks
+    expect(noFilterResults.entries).toHaveLength(3);
+    expect(noFilterResults.results).toHaveLength(3);
   });
 
   test("it handles multiple filter fields correctly", async () => {
@@ -333,22 +285,11 @@ describe("search", () => {
 
     // Insert chunks
     const baseEmbedding = Array(128).fill(0.1);
+    const multiFilterContent = createTestContent("multi-filter doc", 0.1);
     await t.run(async (ctx) => {
-      await insertChunks(ctx, {
-        entryId: doc1Id,
-        startOrder: 0,
-        chunks: createTestChunks(1, 0.1),
-      });
-      await insertChunks(ctx, {
-        entryId: doc2Id,
-        startOrder: 0,
-        chunks: createTestChunks(1, 0.1),
-      });
-      await insertChunks(ctx, {
-        entryId: doc3Id,
-        startOrder: 0,
-        chunks: createTestChunks(1, 0.1),
-      });
+      await insertContent(ctx, { entryId: doc1Id, content: multiFilterContent });
+      await insertContent(ctx, { entryId: doc2Id, content: multiFilterContent });
+      await insertContent(ctx, { entryId: doc3Id, content: multiFilterContent });
     });
 
     // Search for articles with high priority
@@ -413,13 +354,26 @@ describe("search", () => {
     const namespaceId = await setupTestNamespace(t);
     const entryId = await setupTestEntry(t, namespaceId);
 
-    // Insert many chunks
-    const chunks = createTestChunks(10);
+    // Insert content in multiple entries to test limit
+    const entry2Id = await setupTestEntry(t, namespaceId, "e2");
+    const entry3Id = await setupTestEntry(t, namespaceId, "e3");
+    const entry4Id = await setupTestEntry(t, namespaceId, "e4");
     await t.run(async (ctx) => {
-      await insertChunks(ctx, {
+      await insertContent(ctx, {
         entryId,
-        startOrder: 0,
-        chunks,
+        content: createTestContent("limit 1", 0.1),
+      });
+      await insertContent(ctx, {
+        entryId: entry2Id,
+        content: createTestContent("limit 2", 0.11),
+      });
+      await insertContent(ctx, {
+        entryId: entry3Id,
+        content: createTestContent("limit 3", 0.12),
+      });
+      await insertContent(ctx, {
+        entryId: entry4Id,
+        content: createTestContent("limit 4", 0.13),
       });
     });
 
@@ -433,7 +387,7 @@ describe("search", () => {
     });
 
     expect(result.results).toHaveLength(3);
-    expect(result.entries).toHaveLength(1);
+    expect(result.entries).toHaveLength(3);
 
     // Results should be sorted by score (best first)
     for (let i = 1; i < result.results.length; i++) {
@@ -444,27 +398,34 @@ describe("search", () => {
   });
 
   describe("hybrid search", () => {
-    function createSearchableChunks(texts: string[], baseEmbedding = 0.1) {
-      return texts.map((text, i) => ({
-        content: { text, metadata: { index: i } },
-        embedding: [...Array(127).fill(0.01), baseEmbedding + i * 0.01],
+    function createSearchableContent(text: string, baseEmbedding = 0.1) {
+      return {
+        content: { text, metadata: {} },
+        embedding: Array(128).fill(baseEmbedding),
         searchableText: text,
-      }));
+      };
     }
 
-    test("textSearch internal query finds chunks by text content", async () => {
+    test("textSearch internal query finds content by text content", async () => {
       const t = convexTest(schema, modules);
       const namespaceId = await setupTestNamespace(t);
-      const entryId = await setupTestEntry(t, namespaceId);
-
-      const chunks = createSearchableChunks([
-        "The quick brown fox jumps over the lazy dog",
-        "A fast red car drives on the highway",
-        "The brown bear sleeps in the forest",
-      ]);
+      const entry1Id = await setupTestEntry(t, namespaceId, "e1");
+      const entry2Id = await setupTestEntry(t, namespaceId, "e2");
+      const entry3Id = await setupTestEntry(t, namespaceId, "e3");
 
       await t.run(async (ctx) => {
-        await insertChunks(ctx, { entryId, startOrder: 0, chunks });
+        await insertContent(ctx, {
+          entryId: entry1Id,
+          content: createSearchableContent("The quick brown fox jumps over the lazy dog"),
+        });
+        await insertContent(ctx, {
+          entryId: entry2Id,
+          content: createSearchableContent("A fast red car drives on the highway"),
+        });
+        await insertContent(ctx, {
+          entryId: entry3Id,
+          content: createSearchableContent("The brown bear sleeps in the forest"),
+        });
       });
 
       const results = await t.query(internal.search.textSearch, {
@@ -474,10 +435,9 @@ describe("search", () => {
         limit: 10,
       });
 
-      expect(results.length).toBeGreaterThan(0);
-      for (const r of results) {
-        expect(r.entryId).toBe(entryId);
-      }
+      expect(results).toHaveLength(2); // "brown" in entry1 and entry3
+      const entryIds = results.map((r) => r.entryId).sort();
+      expect(entryIds).toEqual([entry1Id, entry3Id].sort());
     });
 
     test("textSearch scopes results to the given namespace", async () => {
@@ -488,15 +448,13 @@ describe("search", () => {
       const entry2Id = await setupTestEntry(t, ns2Id, "entry-2");
 
       await t.run(async (ctx) => {
-        await insertChunks(ctx, {
+        await insertContent(ctx, {
           entryId: entry1Id,
-          startOrder: 0,
-          chunks: createSearchableChunks(["alpha bravo charlie"]),
+          content: createSearchableContent("alpha bravo charlie"),
         });
-        await insertChunks(ctx, {
+        await insertContent(ctx, {
           entryId: entry2Id,
-          startOrder: 0,
-          chunks: createSearchableChunks(["alpha delta echo"]),
+          content: createSearchableContent("alpha delta echo"),
         });
       });
 
@@ -527,15 +485,13 @@ describe("search", () => {
       ]);
 
       await t.run(async (ctx) => {
-        await insertChunks(ctx, {
+        await insertContent(ctx, {
           entryId: cat1Entry,
-          startOrder: 0,
-          chunks: createSearchableChunks(["shared keyword content"]),
+          content: createSearchableContent("shared keyword content"),
         });
-        await insertChunks(ctx, {
+        await insertContent(ctx, {
           entryId: cat2Entry,
-          startOrder: 0,
-          chunks: createSearchableChunks(["shared keyword content"]),
+          content: createSearchableContent("shared keyword content"),
         });
       });
 
@@ -558,14 +514,13 @@ describe("search", () => {
       const namespaceId = await setupTestNamespace(t);
       const entryId = await setupTestEntry(t, namespaceId);
 
-      const chunks = createSearchableChunks([
-        "Machine learning is a subset of artificial intelligence",
-        "Deep learning uses neural networks with many layers",
-        "Natural language processing handles text data",
-      ]);
-
       await t.run(async (ctx) => {
-        await insertChunks(ctx, { entryId, startOrder: 0, chunks });
+        await insertContent(ctx, {
+          entryId,
+          content: createSearchableContent(
+            "Machine learning and deep learning use neural networks with many layers",
+          ),
+        });
       });
 
       // Text-only: no embedding, provide dimension instead.
@@ -595,14 +550,13 @@ describe("search", () => {
       const namespaceId = await setupTestNamespace(t);
       const entryId = await setupTestEntry(t, namespaceId);
 
-      const chunks = createSearchableChunks([
-        "Machine learning is a subset of artificial intelligence",
-        "Deep learning uses neural networks with many layers",
-        "Natural language processing handles text data",
-      ]);
-
       await t.run(async (ctx) => {
-        await insertChunks(ctx, { entryId, startOrder: 0, chunks });
+        await insertContent(ctx, {
+          entryId,
+          content: createSearchableContent(
+            "Machine learning uses neural networks",
+          ),
+        });
       });
 
       const result = await t.action(api.search.search, {
@@ -631,13 +585,13 @@ describe("search", () => {
       const namespaceId = await setupTestNamespace(t);
       const entryId = await setupTestEntry(t, namespaceId);
 
-      const chunks = createSearchableChunks([
-        "Unique content about quantum computing",
-        "Another chunk about classical physics",
-      ]);
-
       await t.run(async (ctx) => {
-        await insertChunks(ctx, { entryId, startOrder: 0, chunks });
+        await insertContent(ctx, {
+          entryId,
+          content: createSearchableContent(
+            "Unique content about quantum computing",
+          ),
+        });
       });
 
       const result = await t.action(api.search.search, {
@@ -662,22 +616,16 @@ describe("search", () => {
       const namespaceId = await setupTestNamespace(t);
       const entryId = await setupTestEntry(t, namespaceId);
 
-      const targetEmbedding = [...Array(127).fill(0.5), 1];
-      const chunks = [
-        {
-          content: { text: "Target chunk", metadata: {} },
-          embedding: targetEmbedding,
-          searchableText: "Target chunk",
-        },
-        {
-          content: { text: "Other chunk", metadata: {} },
-          embedding: [...Array(127).fill(0.1), 0],
-          searchableText: "Other chunk",
-        },
-      ];
-
+      const targetEmbedding = Array(128).fill(0.5);
       await t.run(async (ctx) => {
-        await insertChunks(ctx, { entryId, startOrder: 0, chunks });
+        await insertContent(ctx, {
+          entryId,
+          content: {
+            content: { text: "Target chunk", metadata: {} },
+            embedding: targetEmbedding,
+            searchableText: "Target chunk",
+          },
+        });
       });
 
       const result = await t.action(api.search.search, {
@@ -688,14 +636,8 @@ describe("search", () => {
         limit: 10,
       });
 
-      // Without textQuery, scores should be cosine similarity (not position-based).
-      expect(result.results).toHaveLength(2);
-      expect(result.results[0].score).toBeGreaterThan(result.results[1].score);
-      // Cosine similarity scores are typically between -1 and 1, not exactly 1.0.
-      // Position-based would give exactly 1.0 for the first result.
-      // With cosine similarity the first result can be 1.0 if exact match,
-      // but the second should not follow the linear decrease pattern.
-      expect(result.results[0].content[0].text).toBe("Target chunk");
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0].content.text).toBe("Target chunk");
     });
 
     test("textWeight and vectorWeight influence hybrid ranking", async () => {
@@ -703,14 +645,13 @@ describe("search", () => {
       const namespaceId = await setupTestNamespace(t);
       const entryId = await setupTestEntry(t, namespaceId);
 
-      const chunks = createSearchableChunks([
-        "Alpha topic with specific terminology",
-        "Beta topic with different keywords",
-        "Gamma topic about something else entirely",
-      ]);
-
       await t.run(async (ctx) => {
-        await insertChunks(ctx, { entryId, startOrder: 0, chunks });
+        await insertContent(ctx, {
+          entryId,
+          content: createSearchableContent(
+            "Alpha topic with specific terminology",
+          ),
+        });
       });
 
       const embedding = [...Array(127).fill(0.01), 0.1];
@@ -742,6 +683,312 @@ describe("search", () => {
       // Both should return results.
       expect(textHeavy.results.length).toBeGreaterThan(0);
       expect(vectorHeavy.results.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe("searchSimilar", () => {
+    test("getEntryEmbedding returns embedding and namespace info for ready content", async () => {
+      const t = convexTest(schema, modules);
+      const namespaceId = await setupTestNamespace(t);
+      const entryId = await setupTestEntry(t, namespaceId);
+      const embedding = Array(128).fill(0.5);
+
+      await t.run(async (ctx) => {
+        await insertContent(ctx, {
+          entryId,
+          content: {
+            content: { text: "Ready content", metadata: {} },
+            embedding,
+            searchableText: "Ready content",
+          },
+        });
+      });
+
+      const result = await t.query(internal.search.getEntryEmbedding, {
+        entryId,
+      });
+
+      // Stored vector is normalized and importance-scaled; we strip the weight dim
+      expect(result.embedding).toHaveLength(128);
+      expect(result.namespaceId).toBe(namespaceId);
+      expect(result.filterNames).toEqual([]);
+    });
+
+    test("getEntryEmbedding returns embedding for pending content", async () => {
+      const t = convexTest(schema, modules);
+      const namespaceId = await setupTestNamespace(t);
+      const entryId = await setupTestEntry(t, namespaceId, "pending-entry");
+      await t.run(async (ctx) => {
+        await ctx.db.patch(entryId, {
+          status: { kind: "pending", onComplete: undefined },
+        });
+      });
+      const embedding = Array(128).fill(0.3);
+      await t.run(async (ctx) => {
+        await ctx.db.insert("content", {
+          entryId,
+          text: "Pending text",
+          metadata: {},
+          namespaceId,
+          state: {
+            kind: "pending",
+            embedding,
+            importance: 1,
+            pendingSearchableText: "Pending text",
+          },
+        });
+      });
+
+      const result = await t.query(internal.search.getEntryEmbedding, {
+        entryId,
+      });
+
+      expect(result.embedding).toHaveLength(128);
+      expect(result.embedding.every((v) => v === 0.3)).toBe(true);
+      expect(result.namespaceId).toBe(namespaceId);
+    });
+
+    test("getEntryEmbedding throws when entry not found", async () => {
+      const t = convexTest(schema, modules);
+      const namespaceId = await setupTestNamespace(t);
+      const entryId = await setupTestEntry(t, namespaceId);
+      await t.run(async (ctx) => {
+        await ctx.db.delete(entryId);
+      });
+
+      await expect(
+        t.query(internal.search.getEntryEmbedding, { entryId }),
+      ).rejects.toThrow("Entry");
+    });
+
+    test("getEntryEmbedding throws when entry has no content", async () => {
+      const t = convexTest(schema, modules);
+      const namespaceId = await setupTestNamespace(t);
+      const entryId = await setupTestEntry(t, namespaceId, "no-content-entry");
+      // Do not insert any content for this entry
+
+      await expect(
+        t.query(internal.search.getEntryEmbedding, { entryId }),
+      ).rejects.toThrow("No content found");
+    });
+
+    test("searchSimilar returns entries similar to the given entry and excludes source", async () => {
+      const t = convexTest(schema, modules);
+      const namespaceId = await setupTestNamespace(t);
+
+      const sourceId = await setupTestEntry(t, namespaceId, "source", 0);
+      const similarId = await setupTestEntry(t, namespaceId, "similar", 0);
+      const otherId = await setupTestEntry(t, namespaceId, "other", 0);
+
+      const sourceEmbedding = Array(128).fill(0.5);
+      const similarEmbedding = Array(128).fill(0.52);
+      const otherEmbedding = Array(128).fill(0.1);
+
+      await t.run(async (ctx) => {
+        await insertContent(ctx, {
+          entryId: sourceId,
+          content: {
+            content: { text: "Source content", metadata: {} },
+            embedding: sourceEmbedding,
+            searchableText: "Source content",
+          },
+        });
+        await insertContent(ctx, {
+          entryId: similarId,
+          content: {
+            content: { text: "Similar content", metadata: {} },
+            embedding: similarEmbedding,
+            searchableText: "Similar content",
+          },
+        });
+        await insertContent(ctx, {
+          entryId: otherId,
+          content: {
+            content: { text: "Other content", metadata: {} },
+            embedding: otherEmbedding,
+            searchableText: "Other content",
+          },
+        });
+      });
+
+      const result = await t.action(api.search.searchSimilar, {
+        entryId: sourceId,
+        filters: [],
+        limit: 10,
+      });
+
+      expect(result.results).not.toContainEqual(
+        expect.objectContaining({ entryId: sourceId }),
+      );
+      const resultEntryIds = result.entries.map((e) => e.entryId);
+      expect(resultEntryIds).not.toContain(sourceId);
+      expect(result.results.length).toBeGreaterThan(0);
+      expect(result.entries.length).toBeGreaterThan(0);
+      const topResult = result.results[0];
+      expect(topResult.entryId).toBe(similarId);
+      expect(topResult.content.text).toBe("Similar content");
+    });
+
+    test("searchSimilar respects filters", async () => {
+      const t = convexTest(schema, modules);
+      const namespaceId = await setupTestNamespace(
+        t,
+        "similar-filter-ns",
+        128,
+        ["category"],
+      );
+
+      const sourceId = await setupTestEntry(t, namespaceId, "src", 0, [
+        { name: "category", value: "articles" },
+      ]);
+      const similarId = await setupTestEntry(t, namespaceId, "sim", 0, [
+        { name: "category", value: "articles" },
+      ]);
+      const differentCatId = await setupTestEntry(t, namespaceId, "diff", 0, [
+        { name: "category", value: "blogs" },
+      ]);
+
+      const emb = Array(128).fill(0.5);
+      const content = {
+        content: { text: "Doc", metadata: {} },
+        embedding: emb,
+        searchableText: "Doc",
+      };
+      await t.run(async (ctx) => {
+        await insertContent(ctx, { entryId: sourceId, content });
+        await insertContent(ctx, { entryId: similarId, content });
+        await insertContent(ctx, { entryId: differentCatId, content });
+      });
+
+      const result = await t.action(api.search.searchSimilar, {
+        entryId: sourceId,
+        filters: [{ name: "category", value: "articles" }],
+        limit: 10,
+      });
+
+      expect(result.entries).toHaveLength(1);
+      expect(result.entries[0].entryId).toBe(similarId);
+      expect(result.results).toHaveLength(1);
+    });
+
+    test("searchSimilar respects limit", async () => {
+      const t = convexTest(schema, modules);
+      const namespaceId = await setupTestNamespace(t);
+
+      const sourceId = await setupTestEntry(t, namespaceId, "src");
+      const e2 = await setupTestEntry(t, namespaceId, "e2");
+      const e3 = await setupTestEntry(t, namespaceId, "e3");
+      const e4 = await setupTestEntry(t, namespaceId, "e4");
+
+      const base = Array(128).fill(0.5);
+      await t.run(async (ctx) => {
+        await insertContent(ctx, {
+          entryId: sourceId,
+          content: {
+            content: { text: "S", metadata: {} },
+            embedding: base,
+            searchableText: "S",
+          },
+        });
+        await insertContent(ctx, {
+          entryId: e2,
+          content: {
+            content: { text: "E2", metadata: {} },
+            embedding: [...base.slice(0, 127), 0.51],
+            searchableText: "E2",
+          },
+        });
+        await insertContent(ctx, {
+          entryId: e3,
+          content: {
+            content: { text: "E3", metadata: {} },
+            embedding: [...base.slice(0, 127), 0.52],
+            searchableText: "E3",
+          },
+        });
+        await insertContent(ctx, {
+          entryId: e4,
+          content: {
+            content: { text: "E4", metadata: {} },
+            embedding: [...base.slice(0, 127), 0.53],
+            searchableText: "E4",
+          },
+        });
+      });
+
+      const result = await t.action(api.search.searchSimilar, {
+        entryId: sourceId,
+        filters: [],
+        limit: 2,
+      });
+
+      expect(result.results).toHaveLength(2);
+      expect(result.entries).toHaveLength(2);
+    });
+
+    test("searchSimilar applies vectorScoreThreshold", async () => {
+      const t = convexTest(schema, modules);
+      const namespaceId = await setupTestNamespace(t);
+
+      const sourceId = await setupTestEntry(t, namespaceId, "src");
+      const similarId = await setupTestEntry(t, namespaceId, "sim");
+
+      const highSim = Array(128).fill(0.5);
+      const lowSim = Array(128).fill(0.1);
+      await t.run(async (ctx) => {
+        await insertContent(ctx, {
+          entryId: sourceId,
+          content: {
+            content: { text: "Source", metadata: {} },
+            embedding: highSim,
+            searchableText: "Source",
+          },
+        });
+        await insertContent(ctx, {
+          entryId: similarId,
+          content: {
+            content: { text: "Low similarity", metadata: {} },
+            embedding: lowSim,
+            searchableText: "Low similarity",
+          },
+        });
+      });
+
+      const noThreshold = await t.action(api.search.searchSimilar, {
+        entryId: sourceId,
+        filters: [],
+        limit: 10,
+      });
+      const withThreshold = await t.action(api.search.searchSimilar, {
+        entryId: sourceId,
+        filters: [],
+        limit: 10,
+        vectorScoreThreshold: 0.5,
+      });
+
+      expect(noThreshold.results.length).toBeGreaterThanOrEqual(
+        withThreshold.results.length,
+      );
+      for (const r of withThreshold.results) {
+        expect(r.score).toBeGreaterThanOrEqual(0.5);
+      }
+    });
+
+    test("searchSimilar throws when entry not found", async () => {
+      const t = convexTest(schema, modules);
+      const namespaceId = await setupTestNamespace(t);
+      const entryId = await setupTestEntry(t, namespaceId);
+      await t.run(async (ctx) => {
+        await ctx.db.delete(entryId);
+      });
+
+      await expect(
+        t.action(api.search.searchSimilar, {
+          entryId,
+          filters: [],
+          limit: 10,
+        }),
+      ).rejects.toThrow("Entry");
     });
   });
 });

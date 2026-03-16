@@ -1,5 +1,5 @@
 import { useCallback, useEffect } from "react";
-import { useConvex, useQuery } from "convex/react";
+import { useConvex } from "convex/react";
 import { usePaginatedQuery } from "convex-helpers/react";
 import { api } from "../../convex/_generated/api";
 import type { PublicFile } from "../../convex/example";
@@ -13,28 +13,6 @@ interface FileListProps {
 }
 
 function PendingDocumentProgress({ doc }: { doc: PublicFile }) {
-  const chunks = useQuery(api.example.listChunks, {
-    entryId: doc.entryId,
-    order: "desc",
-    paginationOpts: { cursor: null, numItems: 100 },
-  });
-
-  // Calculate progress info
-  const progress = (() => {
-    if (!chunks?.page?.length) return { added: 0, live: 0 };
-
-    // Total chunks added (highest order number + 1, since order is 0-based)
-    const added = chunks.page[0].order + 1;
-
-    // Find first chunk with state "ready" to get live count
-    const firstReadyChunk = chunks.page.find(
-      (chunk) => chunk.state === "ready",
-    );
-    const live = firstReadyChunk ? firstReadyChunk.order + 1 : 0;
-
-    return { added, live };
-  })();
-
   return (
     <div className="group relative p-4 bg-gradient-to-r from-orange-50 to-amber-50 border-2 border-orange-200 rounded-2xl shadow-lg transition-all duration-300 hover:shadow-xl">
       <div className="flex items-center justify-between">
@@ -78,42 +56,12 @@ function PendingDocumentProgress({ doc }: { doc: PublicFile }) {
                 Processing...
               </span>
             </div>
-            {!chunks?.page?.length ? (
-              <div className="flex items-center space-x-2">
-                <div className="animate-spin rounded-full h-3 w-3 border-b border-orange-500"></div>
-                <span className="text-xs text-orange-600">
-                  ⚙️ Generating text...
-                </span>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                <div className="flex items-center space-x-4 text-xs text-orange-700">
-                  <span className="flex items-center">
-                    <span className="w-2 h-2 bg-orange-400 rounded-full mr-1"></span>
-                    📝 Added: {progress.added} chunks
-                  </span>
-                  <span className="flex items-center">
-                    <span className="w-2 h-2 bg-emerald-400 rounded-full mr-1"></span>
-                    ✅ Live: {progress.live} chunks
-                  </span>
-                </div>
-                {progress.live > 0 && progress.added > progress.live && (
-                  <div className="flex items-center space-x-2">
-                    <div className="flex-1 bg-orange-200 rounded-full h-2 overflow-hidden">
-                      <div
-                        className="bg-gradient-to-r from-orange-500 to-amber-500 h-2 rounded-full transition-all duration-300"
-                        style={{
-                          width: `${(progress.live / progress.added) * 100}%`,
-                        }}
-                      ></div>
-                    </div>
-                    <span className="text-xs text-orange-700 font-medium">
-                      {Math.round((progress.live / progress.added) * 100)}%
-                    </span>
-                  </div>
-                )}
-              </div>
-            )}
+            <div className="flex items-center space-x-2">
+              <div className="animate-spin rounded-full h-3 w-3 border-b border-orange-500"></div>
+              <span className="text-xs text-orange-600">
+                ⚙️ Indexing content...
+              </span>
+            </div>
           </div>
         </div>
       </div>

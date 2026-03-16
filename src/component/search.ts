@@ -16,7 +16,8 @@ import {
   type EntryId,
 } from "../shared.js";
 import type { Doc, Id } from "./_generated/dataModel.js";
-import { buildRanges, type vRangeResult } from "./chunks.js";
+import { type vContentResult } from "./content.js";
+import { publicEntry } from "./entries.js";
 import { hybridRank } from "../client/hybridRank.js";
 import { vVectorId, type VectorTableId } from "./embeddings/tables.js";
 
@@ -30,9 +31,6 @@ export const search = action({
     filters: v.array(vNamedFilter),
     limit: v.number(),
     vectorScoreThreshold: v.optional(v.number()),
-    chunkContext: v.optional(
-      v.object({ before: v.number(), after: v.number() }),
-    ),
     searchType: v.optional(vSearchType),
     textQuery: v.optional(v.string()),
     textWeight: v.optional(v.number()),
@@ -76,7 +74,6 @@ export const search = action({
       };
     }
 
-    const chunkContext = args.chunkContext ?? { before: 0, after: 0 };
     const numberedFilters = numberedFiltersFromNamedFilters(
       filters,
       namespace.filterNames,
@@ -95,27 +92,27 @@ export const search = action({
       });
       const threshold = args.vectorScoreThreshold ?? -1;
       const aboveThreshold = vectorResults.filter((r) => r._score >= threshold);
-      // TODO: break this up if there are too many results
-      const { ranges, entries } = await ctx.runQuery(
-        internal.chunks.getRangesOfChunks,
+      const { results: contentResults, entries } = await ctx.runQuery(
+        internal.content.getContentByEmbeddingIds,
         {
           embeddingIds: aboveThreshold.map((r) => r._id),
-          chunkContext,
         },
       );
       return {
-        results: ranges
-          .map((r, i) => publicSearchResult(r, aboveThreshold[i]._score))
-          .filter((r) => r !== null),
+        results: contentResults
+          .map((r, i) =>
+            r ? publicSearchResult(r, aboveThreshold[i]._score) : null,
+          )
+          .filter((r): r is SearchResult => r !== null),
         entries: entries as Infer<typeof vEntry>[],
       };
     }
 
     // Hybrid or text-only path: combine vector and text results with RRF.
     let embeddingIds: VectorTableId[] = [];
-    if (hasEmbedding) {
+    if (hasEmbedding && embedding) {
       const vectorResults = await searchEmbeddings(ctx, {
-        embedding: embedding!,
+        embedding,
         namespaceId: namespace._id,
         filters: numberedFilters,
         limit,
@@ -132,34 +129,32 @@ export const search = action({
       );
     }
 
-    const { ranges, entries, resultCount } = await ctx.runQuery(
-      internal.search.textAndRanges,
-      {
+    const textQuery = args.textQuery;
+    const { results: contentResults, entries, resultCount } =
+      await ctx.runQuery(internal.search.textAndContent, {
         embeddingIds,
-        textQuery: args.textQuery!,
+        textQuery: textQuery ?? "",
         namespaceId: namespace._id,
         filters: numberedFilters,
         limit,
         vectorWeight: args.vectorWeight ?? 1,
         textWeight: args.textWeight ?? 1,
-        chunkContext,
-      },
-    );
+      });
 
-    // Position-based scores (1.0 for first, decreasing linearly).
     return {
-      results: ranges
-        .map((r, i) => publicSearchResult(r, (resultCount - i) / resultCount))
-        .filter((r) => r !== null),
+      results: contentResults
+        .map((r, i) =>
+          r ? publicSearchResult(r, (resultCount - i) / resultCount) : null,
+        )
+        .filter((r): r is SearchResult => r !== null),
       entries: entries as Infer<typeof vEntry>[],
     };
   },
 });
 
 type TextSearchResult = {
-  chunkId: Id<"chunks">;
+  contentId: Id<"content">;
   entryId: Id<"entries">;
-  order: number;
 };
 
 async function textSearchImpl(
@@ -171,19 +166,17 @@ async function textSearchImpl(
     limit: number;
   },
 ): Promise<TextSearchResult[]> {
-  const toResults = (chunks: Doc<"chunks">[]): TextSearchResult[] =>
-    chunks
-      .filter((chunk) => chunk.state.kind === "ready")
-      .map((chunk) => ({
-        chunkId: chunk._id,
-        entryId: chunk.entryId,
-        order: chunk.order,
+  const toResults = (contents: Doc<"content">[]): TextSearchResult[] =>
+    contents
+      .filter((content) => content.state.kind === "ready")
+      .map((content) => ({
+        contentId: content._id,
+        entryId: content.entryId,
       }));
 
-  // No user filters — just filter by namespaceId.
   if (args.filters.length === 0) {
     const results = await ctx.db
-      .query("chunks")
+      .query("content")
       .withSearchIndex("searchableText", (q) =>
         q
           .search("state.searchableText", args.query)
@@ -193,13 +186,12 @@ async function textSearchImpl(
     return toResults(results);
   }
 
-  // OR across filter conditions: run one text search per filter and dedupe.
-  const seen = new Set<Id<"chunks">>();
+  const seen = new Set<Id<"content">>();
   const merged: TextSearchResult[] = [];
   for (const filter of args.filters) {
     const fields = filterFieldsFromNumbers(args.namespaceId, filter);
     const results = await ctx.db
-      .query("chunks")
+      .query("content")
       .withSearchIndex("searchableText", (q) => {
         let query = q
           .search("state.searchableText", args.query)
@@ -214,8 +206,8 @@ async function textSearchImpl(
       })
       .take(args.limit);
     for (const r of toResults(results)) {
-      if (!seen.has(r.chunkId)) {
-        seen.add(r.chunkId);
+      if (!seen.has(r.contentId)) {
+        seen.add(r.contentId);
         merged.push(r);
       }
     }
@@ -227,15 +219,13 @@ export const textSearch = internalQuery({
   args: {
     query: v.string(),
     namespaceId: v.id("namespaces"),
-    // Numbered filters, OR'd together (same semantics as vector search).
     filters: v.array(v.any()),
     limit: v.number(),
   },
   returns: v.array(
     v.object({
-      chunkId: v.id("chunks"),
+      contentId: v.id("content"),
       entryId: v.id("entries"),
-      order: v.number(),
     }),
   ),
   handler: async (ctx, args) => {
@@ -248,7 +238,7 @@ export const textSearch = internalQuery({
   },
 });
 
-export const textAndRanges = internalQuery({
+export const textAndContent = internalQuery({
   args: {
     embeddingIds: v.array(vVectorId),
     textQuery: v.string(),
@@ -257,22 +247,17 @@ export const textAndRanges = internalQuery({
     limit: v.number(),
     vectorWeight: v.number(),
     textWeight: v.number(),
-    chunkContext: v.object({ before: v.number(), after: v.number() }),
   },
   returns: v.object({
-    ranges: v.array(
+    results: v.array(
       v.union(
         v.null(),
         v.object({
           entryId: v.id("entries"),
-          order: v.number(),
-          startOrder: v.number(),
-          content: v.array(
-            v.object({
-              text: v.string(),
-              metadata: v.optional(v.record(v.string(), v.any())),
-            }),
-          ),
+          content: v.object({
+            text: v.string(),
+            metadata: v.optional(v.record(v.string(), v.any())),
+          }),
         }),
       ),
     ),
@@ -280,64 +265,214 @@ export const textAndRanges = internalQuery({
     resultCount: v.number(),
   }),
   handler: async (ctx, args) => {
-    // 1. Map embedding IDs to chunk IDs.
-    const vectorChunkIds: Id<"chunks">[] = (
+    const vectorContentIds: Id<"content">[] = (
       await Promise.all(
         args.embeddingIds.map(async (embeddingId) => {
-          const chunk = await ctx.db
-            .query("chunks")
+          const content = await ctx.db
+            .query("content")
             .withIndex("embeddingId", (q) =>
               q.eq("state.embeddingId", embeddingId),
             )
-            .order("desc")
             .first();
-          return chunk?._id ?? null;
+          return content?._id ?? null;
         }),
       )
     ).filter((id) => id !== null);
 
-    // 2. Run text search.
     const textResults = await textSearchImpl(ctx, {
       query: args.textQuery,
       namespaceId: args.namespaceId,
       filters: args.filters as NumberedFilter[],
       limit: args.limit,
     });
-    const textChunkIds: Id<"chunks">[] = textResults.map((r) => r.chunkId);
+    const textContentIds: Id<"content">[] = textResults.map((r) => r.contentId);
 
-    // 3. Merge using Reciprocal Rank Fusion.
-    const mergedChunkIds = hybridRank<Id<"chunks">>(
-      [vectorChunkIds, textChunkIds],
+    const mergedContentIds = hybridRank<Id<"content">>(
+      [vectorContentIds, textContentIds],
       { k: 10, weights: [args.vectorWeight, args.textWeight] },
     ).slice(0, args.limit);
 
-    if (mergedChunkIds.length === 0) {
-      return { ranges: [], entries: [], resultCount: 0 };
+    if (mergedContentIds.length === 0) {
+      return { results: [], entries: [], resultCount: 0 };
     }
 
-    // 4. Build ranges from merged chunk IDs.
-    const chunks = await Promise.all(
-      mergedChunkIds.map((id) => ctx.db.get(id)),
+    const contentDocs = await Promise.all(
+      mergedContentIds.map((id) => ctx.db.get(id)),
     );
-    const { ranges, entries } = await buildRanges(
-      ctx,
-      chunks,
-      args.chunkContext,
+    const entryIdsInOrder = [
+      ...new Set(
+        contentDocs
+          .filter((c): c is Doc<"content"> => c !== null)
+          .map((c) => c.entryId),
+      ),
+    ];
+    const entryDocs = (
+      await Promise.all(entryIdsInOrder.map((id) => ctx.db.get(id)))
+    ).filter((d): d is Doc<"entries"> => d !== null);
+    const entries = entryDocs.map(publicEntry);
+    const results = contentDocs.map((content) =>
+      content
+        ? {
+            entryId: content.entryId,
+            content: { text: content.text, metadata: content.metadata },
+          }
+        : null,
     );
-    return { ranges, entries, resultCount: mergedChunkIds.length };
+    return {
+      results,
+      entries,
+      resultCount: mergedContentIds.length,
+    };
+  },
+});
+
+export const getEntryEmbedding = internalQuery({
+  args: {
+    entryId: v.id("entries"),
+  },
+  returns: v.object({
+    embedding: v.array(v.number()),
+    namespaceId: v.id("namespaces"),
+    filterNames: v.array(v.string()),
+  }),
+  handler: async (ctx, args) => {
+    const entry = await ctx.db.get(args.entryId);
+    if (!entry) {
+      throw new Error(`Entry ${args.entryId} not found`);
+    }
+
+    const content = await ctx.db
+      .query("content")
+      .withIndex("entryId", (q) => q.eq("entryId", args.entryId))
+      .first();
+    if (!content) {
+      throw new Error(`No content found for entry ${args.entryId}`);
+    }
+
+    let embedding: number[];
+    switch (content.state.kind) {
+      case "pending":
+        embedding = content.state.embedding;
+        break;
+      case "ready": {
+        const vector = await ctx.db.get(content.state.embeddingId);
+        if (!vector) {
+          throw new Error(
+            `Vector ${content.state.embeddingId} not found`,
+          );
+        }
+        // Strip the importance weight dimension appended by vectorWithImportance
+        embedding = vector.vector.slice(0, -1);
+        // 4096-dim embeddings were truncated to 4095 to fit the importance
+        // weight within the 4096 limit; pad back so searchEmbeddings resolves
+        // the correct vector table.
+        if (embedding.length === 4095) {
+          embedding.push(0);
+        }
+        break;
+      }
+      case "replaced": {
+        embedding = content.state.vector.slice(0, -1);
+        if (embedding.length === 4095) {
+          embedding.push(0);
+        }
+        break;
+      }
+    }
+
+    const namespace = await ctx.db.get(entry.namespaceId);
+    if (!namespace) {
+      throw new Error(`Namespace ${entry.namespaceId} not found`);
+    }
+
+    return {
+      embedding,
+      namespaceId: entry.namespaceId,
+      filterNames: namespace.filterNames,
+    };
+  },
+});
+
+export const searchSimilar = action({
+  args: {
+    entryId: v.id("entries"),
+    filters: v.array(vNamedFilter),
+    limit: v.number(),
+    vectorScoreThreshold: v.optional(v.number()),
+  },
+  returns: v.object({
+    results: v.array(vSearchResult),
+    entries: v.array(vEntry),
+  }),
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{
+    results: SearchResult[];
+    entries: Infer<typeof vEntry>[];
+  }> => {
+    const { entryId, filters, limit } = args;
+
+    const { embedding, namespaceId, filterNames } = await ctx.runQuery(
+      internal.search.getEntryEmbedding,
+      { entryId },
+    );
+
+    const numberedFilters = numberedFiltersFromNamedFilters(
+      filters,
+      filterNames,
+    );
+
+    const vectorResults = await searchEmbeddings(ctx, {
+      embedding,
+      namespaceId,
+      filters: numberedFilters,
+      limit: limit + 1,
+    });
+
+    const threshold = args.vectorScoreThreshold ?? -1;
+    const aboveThreshold = vectorResults.filter((r) => r._score >= threshold);
+
+    const { results: contentResults, entries } = await ctx.runQuery(
+      internal.content.getContentByEmbeddingIds,
+      {
+        embeddingIds: aboveThreshold.map((r) => r._id),
+      },
+    );
+
+    const sourceEntryIdStr = entryId as unknown as string;
+    const results = contentResults
+      .map((r, i) =>
+        r ? publicSearchResult(r, aboveThreshold[i]._score) : null,
+      )
+      .filter(
+        (r): r is SearchResult =>
+          r !== null &&
+          (r.entryId as unknown as string) !== sourceEntryIdStr,
+      )
+      .slice(0, limit);
+
+    const resultEntryIds = new Set(results.map((r) => r.entryId));
+
+    return {
+      results,
+      entries: (entries as Infer<typeof vEntry>[]).filter((e) =>
+        resultEntryIds.has(e.entryId),
+      ),
+    };
   },
 });
 
 function publicSearchResult(
-  r: Infer<typeof vRangeResult> | null,
+  r: Infer<typeof vContentResult> | null,
   score: number,
 ): SearchResult | null {
   if (r === null) {
     return null;
   }
   return {
-    ...r,
-    score,
     entryId: r.entryId as unknown as EntryId,
+    content: r.content,
+    score,
   };
 }

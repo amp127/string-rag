@@ -10,10 +10,6 @@ import { vNamedFilter, type NamedFilter } from "./component/filters.js";
 import { brandedString } from "convex-helpers/validators";
 import type { FunctionReference } from "convex/server";
 
-// A good middle-ground that has up to ~3MB if embeddings are 4096 (max).
-// Also a reasonable number of writes to the DB.
-export const CHUNK_BATCH_SIZE = 100;
-
 // Branded types for IDs, as components don't expose the internal ID types.
 export const vNamespaceId = brandedString("NamespaceId");
 export const vEntryId = brandedString("EntryId");
@@ -22,14 +18,10 @@ export type EntryId = Infer<typeof vEntryId>;
 
 export const vSearchResult = v.object({
   entryId: vEntryId,
-  order: v.number(),
-  content: v.array(
-    v.object({
-      text: v.string(),
-      metadata: v.optional(v.record(v.string(), v.any())),
-    }),
-  ),
-  startOrder: v.number(),
+  content: v.object({
+    text: v.string(),
+    metadata: v.optional(v.record(v.string(), v.any())),
+  }),
   score: v.number(),
 });
 
@@ -145,16 +137,7 @@ export type Entry<
   | { status: "replaced"; replacedAt: number }
 );
 
-export const vChunk = v.object({
-  order: v.number(),
-  state: vStatus,
-  text: v.string(),
-  metadata: v.optional(v.record(v.string(), v.any())),
-});
-
-export type Chunk = Infer<typeof vChunk>;
-
-export const vCreateChunkArgs = v.object({
+export const vCreateContentArgs = v.object({
   content: v.object({
     text: v.string(),
     metadata: v.optional(v.record(v.string(), v.any())),
@@ -162,7 +145,7 @@ export const vCreateChunkArgs = v.object({
   embedding: v.array(v.number()),
   searchableText: v.optional(v.string()),
 });
-export type CreateChunkArgs = Infer<typeof vCreateChunkArgs>;
+export type CreateContentArgs = Infer<typeof vCreateContentArgs>;
 
 export function vPaginationResult<
   T extends Validator<Value, "required", string>,
@@ -226,16 +209,16 @@ export type OnComplete = FunctionReference<
   null
 >;
 
-export const vChunkerArgs = v.object({
+export const vContentProcessorArgs = v.object({
   namespace: vNamespace,
   entry: vEntry,
-  insertChunks: v.string(),
+  insertContent: v.string(),
 });
 
-export type ChunkerAction = FunctionReference<
+export type ContentProcessorAction = FunctionReference<
   "action",
   "internal",
-  IdsToStrings<Infer<typeof vChunkerArgs>>,
+  IdsToStrings<Infer<typeof vContentProcessorArgs>>,
   null
 >;
 

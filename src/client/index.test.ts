@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { RAG } from "./index.js";
+import { RAG, type EntryId } from "./index.js";
 import type { DataModelFromSchemaDefinition } from "convex/server";
 import {
   anyApi,
@@ -46,11 +46,15 @@ export const findEntryByContentHash = query({
 export const add = mutation({
   args: {
     key: v.string(),
-    chunks: v.array(
+    text: v.optional(v.string()),
+    content: v.optional(
       v.object({
-        text: v.string(),
-        metadata: v.record(v.string(), v.any()),
+        content: v.object({
+          text: v.string(),
+          metadata: v.optional(v.record(v.string(), v.any())),
+        }),
         embedding: v.array(v.number()),
+        searchableText: v.optional(v.string()),
       }),
     ),
     namespace: v.string(),
@@ -77,7 +81,10 @@ export const add = mutation({
     contentHash: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    return rag.add(ctx, args);
+    if (args.content) {
+      return rag.add(ctx, { ...args, content: args.content });
+    }
+    return rag.add(ctx, { ...args, text: args.text ?? "" });
   },
 });
 
@@ -86,19 +93,12 @@ export const search = action({
     embedding: v.array(v.number()),
     namespace: v.string(),
     limit: v.optional(v.number()),
-    chunkContext: v.optional(
-      v.object({
-        before: v.number(),
-        after: v.number(),
-      }),
-    ),
   },
   handler: async (ctx, args) => {
     const { results, entries, text, usage } = await rag.search(ctx, {
       query: args.embedding,
       namespace: args.namespace,
       limit: args.limit ?? 10,
-      chunkContext: args.chunkContext ?? { before: 0, after: 0 },
     });
 
     return {
@@ -110,11 +110,27 @@ export const search = action({
   },
 });
 
+export const searchSimilar = action({
+  args: {
+    entryId: v.string(),
+    limit: v.optional(v.number()),
+    vectorScoreThreshold: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    return rag.searchSimilar(ctx, {
+      entryId: args.entryId as EntryId,
+      limit: args.limit ?? 10,
+      vectorScoreThreshold: args.vectorScoreThreshold,
+    });
+  },
+});
+
 const testApi: ApiFromModules<{
   fns: {
     findEntryByContentHash: typeof findEntryByContentHash;
     add: typeof add;
     search: typeof search;
+    searchSimilar: typeof searchSimilar;
   };
 }>["fns"] = anyApi["index.test"] as any;
 
@@ -124,53 +140,67 @@ function dummyEmbeddings(text: string) {
   );
 }
 
+function addWithDummyContent(
+  t: { mutation: (fn: unknown, args: unknown) => Promise<unknown> },
+  args: {
+    key: string;
+    text: string;
+    namespace: string;
+    title?: string;
+    contentHash?: string;
+  },
+) {
+  const { key, text, namespace, title, contentHash } = args;
+  return t.mutation(testApi.add, {
+    key,
+    namespace,
+    title,
+    contentHash,
+    content: {
+      content: { text },
+      embedding: dummyEmbeddings(text),
+      searchableText: text,
+    },
+  });
+}
+
 describe("RAG thick client", () => {
   test("should add a entry and be able to list it", async () => {
     const t = initConvexTest(schema);
-    const { entryId, status, usage } = await t.mutation(testApi.add, {
+    const { entryId, status, usage } = await addWithDummyContent(t, {
       key: "test",
-      chunks: [
-        { text: "A", metadata: {}, embedding: dummyEmbeddings("A") },
-        { text: "B", metadata: {}, embedding: dummyEmbeddings("B") },
-        { text: "C", metadata: {}, embedding: dummyEmbeddings("C") },
-      ],
+      text: "Hello world",
       namespace: "test",
     });
     expect(entryId).toBeDefined();
     expect(status).toBe("ready");
     expect(usage).toEqual({ tokens: 0 });
     await t.run(async (ctx) => {
-      const { isDone, page } = await rag.listChunks(ctx, {
-        entryId,
-        paginationOpts: { numItems: 10, cursor: null },
+      const ns = await rag.getNamespace(ctx, { namespace: "test" });
+      expect(ns).not.toBeNull();
+      const { page } = await rag.list(ctx, {
+        namespaceId: ns!.namespaceId,
+        limit: 10,
       });
-      expect(page.length).toBe(3);
-      expect(isDone).toBe(true);
-      expect(page[0].order).toBe(0);
-      expect(page[1].order).toBe(1);
-      expect(page[2].order).toBe(2);
+      expect(page.length).toBeGreaterThanOrEqual(1);
+      expect(page.some((e) => e.entryId === entryId)).toBe(true);
     });
   });
 
   test("should work from a test function", async () => {
     const t = initConvexTest(schema);
-    await t.mutation(testApi.add, {
+    await addWithDummyContent(t, {
       key: "test",
-      chunks: [
-        { text: "A", metadata: {}, embedding: dummyEmbeddings("A") },
-        { text: "B", metadata: {}, embedding: dummyEmbeddings("B") },
-        { text: "C", metadata: {}, embedding: dummyEmbeddings("C") },
-      ],
+      text: "Test content",
       namespace: "test",
     });
-    // expect(result).toBe(1);
   });
 
   test("should be able to re-add an entry with the same key", async () => {
     const t = initConvexTest(schema);
-    const { entryId, status, usage } = await t.mutation(testApi.add, {
+    const { entryId, status, usage } = await addWithDummyContent(t, {
       key: "test",
-      chunks: [{ text: "A", metadata: {}, embedding: dummyEmbeddings("A") }],
+      text: "A",
       namespace: "test",
     });
     expect(entryId).toBeDefined();
@@ -180,87 +210,49 @@ describe("RAG thick client", () => {
       entryId: entryId2,
       status: status2,
       usage: usage2,
-    } = await t.mutation(testApi.add, {
+    } = await addWithDummyContent(t, {
       key: "test",
-      chunks: [{ text: "A", metadata: {}, embedding: dummyEmbeddings("A") }],
+      text: "A",
       namespace: "test",
     });
     expect(entryId2).toBeDefined();
     expect(status2).toBe("ready");
     expect(usage2).toEqual({ tokens: 0 });
-    const { page } = await t.query(components.rag.chunks.list, {
-      entryId: entryId2,
-      paginationOpts: { numItems: 10, cursor: null },
-      order: "asc",
-    });
-    expect(page.length).toBe(1);
-    expect(page[0].order).toBe(0);
-    expect(page[0].text).toBe("A");
-    expect(page[0].state).toBe("ready");
+    const entry = await t.run(async (ctx) => rag.getEntry(ctx, { entryId: entryId2 }));
+    expect(entry).not.toBeNull();
+    expect(entry!.entryId).toBe(entryId2);
   });
 
   describe("text formatting validation", () => {
-    test("should format single entry with sequential chunks correctly", async () => {
+    test("should format single entry content correctly", async () => {
       const t = initConvexTest(schema);
 
-      // Add entry with sequential chunks
-      await t.mutation(testApi.add, {
+      await addWithDummyContent(t, {
         key: "sequential-test",
-        chunks: [
-          {
-            text: "Chunk 1 content",
-            metadata: {},
-            embedding: dummyEmbeddings("Chunk 1 content"),
-          },
-          {
-            text: "Chunk 2 content",
-            metadata: {},
-            embedding: dummyEmbeddings("Chunk 2 content"),
-          },
-          {
-            text: "Chunk 3 content",
-            metadata: {},
-            embedding: dummyEmbeddings("Chunk 3 content"),
-          },
-        ],
+        text: "Single content block",
         namespace: "format-test",
         title: "Test Document",
       });
 
-      // Search and verify text format
       const { text, entries, usage } = await t.action(testApi.search, {
         embedding: dummyEmbeddings("content"),
         namespace: "format-test",
         limit: 10,
       });
 
-      // Should match README format: "## Title:\n{entry.text}"
       expect(text).toContain("## Test Document:");
       expect(entries).toHaveLength(1);
-      expect(entries[0].text).toBe(
-        "Chunk 1 content\nChunk 2 content\nChunk 3 content",
-      );
-
-      // Overall text should be: "## Test Document:\nChunk 1 content\nChunk 2 content\nChunk 3 content"
-      expect(text).toBe(
-        "## Test Document:\n\nChunk 1 content\nChunk 2 content\nChunk 3 content",
-      );
+      expect(entries[0].text).toBe("Single content block");
+      expect(text).toBe("## Test Document:\n\nSingle content block");
       expect(usage).toEqual({ tokens: 0 });
     });
 
     test("should format single entry without title correctly", async () => {
       const t = initConvexTest(schema);
 
-      // Add entry without title
-      await t.mutation(testApi.add, {
+      await addWithDummyContent(t, {
         key: "no-title-test",
-        chunks: [
-          {
-            text: "Content without title",
-            metadata: {},
-            embedding: dummyEmbeddings("Content without title"),
-          },
-        ],
+        text: "Content without title",
         namespace: "format-test-notitle",
       });
 
@@ -278,89 +270,40 @@ describe("RAG thick client", () => {
       expect(usage).toEqual({ tokens: 0 });
     });
 
-    test("should format non-sequential chunks with ellipsis separator", async () => {
+    test("should return entry text from search", async () => {
       const t = initConvexTest(schema);
 
-      // Add multiple entries to create potential non-sequential results
-      await t.mutation(testApi.add, {
+      await addWithDummyContent(t, {
         key: "doc1",
-        chunks: [
-          {
-            text: "Chunk 1 content",
-            metadata: {},
-            embedding: dummyEmbeddings("Chunk 1 content"),
-          },
-          {
-            text: "Chunk 2 content",
-            metadata: {},
-            embedding: dummyEmbeddings("Chunk 2 content"),
-          },
-          {
-            text: "Important chunk",
-            metadata: {},
-            embedding: dummyEmbeddings("A important chunk"),
-          },
-          {
-            text: "Chunk 4 content",
-            metadata: {},
-            embedding: dummyEmbeddings("Chunk 4 content"),
-          },
-          {
-            text: "Another important chunk",
-            metadata: {},
-            // embedding hack uses first char to determine order
-            embedding: dummyEmbeddings("B important chunk"),
-          },
-        ],
+        text: "Important chunk content",
         namespace: "ellipsis-test",
-        title: "Document with gaps",
+        title: "Document",
       });
 
-      // Search with chunk context to potentially get non-sequential results
       const { text, entries } = await t.action(testApi.search, {
-        embedding: dummyEmbeddings("A important chunk"),
+        embedding: dummyEmbeddings("Important chunk"),
         namespace: "ellipsis-test",
         limit: 2,
-        chunkContext: { before: 0, after: 0 }, // Just the matching chunks
       });
 
       expect(entries).toHaveLength(1);
-
-      // If we get non-sequential chunks, they should be separated by "\n...\n"
-      // The exact behavior depends on the search results, but we can at least verify structure
-      expect(entries[0].text).toContain("Important chunk");
-      expect(entries[0].text).toContain("Another important chunk");
-
-      // The text might contain ellipsis if chunks are non-sequential
-      expect(text).toMatch(/\n\.\.\.\n/);
+      expect(entries[0].text).toBe("Important chunk content");
+      expect(text).toContain("Important chunk content");
     });
 
     test("should format multiple entries with separators", async () => {
       const t = initConvexTest(schema);
 
-      // Add two separate entries
-      await t.mutation(testApi.add, {
+      await addWithDummyContent(t, {
         key: "first-doc",
-        chunks: [
-          {
-            text: "First document content",
-            metadata: {},
-            embedding: dummyEmbeddings("First document content"),
-          },
-        ],
+        text: "First document content",
         namespace: "multi-entry-test",
         title: "First Document",
       });
 
-      await t.mutation(testApi.add, {
+      await addWithDummyContent(t, {
         key: "second-doc",
-        chunks: [
-          {
-            text: "Second document content",
-            metadata: {},
-            embedding: dummyEmbeddings("Second document content"),
-          },
-        ],
+        text: "Second document content",
         namespace: "multi-entry-test",
         title: "Second Document",
       });
@@ -385,30 +328,16 @@ describe("RAG thick client", () => {
     test("should format mixed entries (with and without titles)", async () => {
       const t = initConvexTest(schema);
 
-      // Add entry with title
-      await t.mutation(testApi.add, {
+      await addWithDummyContent(t, {
         key: "titled-doc",
-        chunks: [
-          {
-            text: "Content with title",
-            metadata: {},
-            embedding: dummyEmbeddings("Content with title"),
-          },
-        ],
+        text: "Content with title",
         namespace: "mixed-test",
         title: "Titled Document",
       });
 
-      // Add entry without title
-      await t.mutation(testApi.add, {
+      await addWithDummyContent(t, {
         key: "untitled-doc",
-        chunks: [
-          {
-            text: "Content without title",
-            metadata: {},
-            embedding: dummyEmbeddings("Content without title"),
-          },
-        ],
+        text: "Content without title",
         namespace: "mixed-test",
       });
 
@@ -437,39 +366,16 @@ describe("RAG thick client", () => {
     test("should match exact README format specification", async () => {
       const t = initConvexTest(schema);
 
-      // Create the exact scenario from README example
-      await t.mutation(testApi.add, {
+      await addWithDummyContent(t, {
         key: "title1-doc",
-        chunks: [
-          {
-            text: "Chunk 1 contents",
-            metadata: {},
-            embedding: dummyEmbeddings("Chunk 1 contents"),
-          },
-          {
-            text: "Chunk 2 contents",
-            metadata: {},
-            embedding: dummyEmbeddings("Chunk 2 contents"),
-          },
-        ],
+        text: "Chunk 1 contents",
         namespace: "readme-format-test",
         title: "Title 1",
       });
 
-      await t.mutation(testApi.add, {
+      await addWithDummyContent(t, {
         key: "title2-doc",
-        chunks: [
-          {
-            text: "Chunk 3 contents",
-            metadata: {},
-            embedding: dummyEmbeddings("Chunk 3 contents"),
-          },
-          {
-            text: "Chunk 4 contents",
-            metadata: {},
-            embedding: dummyEmbeddings("Chunk 4 contents"),
-          },
-        ],
+        text: "Chunk 3 contents",
         namespace: "readme-format-test",
         title: "Title 2",
       });
@@ -496,20 +402,111 @@ describe("RAG thick client", () => {
 
       expect(entries).toHaveLength(2);
 
-      // Individual entry texts should follow the pattern
       expect(text).toBe(
         `## Title 1:
 
 Chunk 1 contents
-Chunk 2 contents
 
 ---
 
 ## Title 2:
 
-Chunk 3 contents
-Chunk 4 contents`,
+Chunk 3 contents`,
       );
+    });
+  });
+
+  describe("searchSimilar", () => {
+    test("returns entries similar to the given entry and excludes source", async () => {
+      const t = initConvexTest(schema);
+
+      const { entryId: sourceId } = await addWithDummyContent(t, {
+        key: "source-doc",
+        text: "Source document about machine learning",
+        namespace: "similar-test",
+        title: "Source",
+      });
+      await addWithDummyContent(t, {
+        key: "similar-doc",
+        text: "Similar document about ML and neural networks",
+        namespace: "similar-test",
+        title: "Similar",
+      });
+      await addWithDummyContent(t, {
+        key: "other-doc",
+        text: "Unrelated document about cooking recipes",
+        namespace: "similar-test",
+        title: "Other",
+      });
+
+      const { results, entries, text } = await t.action(testApi.searchSimilar, {
+        entryId: sourceId,
+        limit: 10,
+      });
+
+      const resultEntryIds = entries.map((e) => e.entryId);
+      expect(resultEntryIds).not.toContain(sourceId);
+      expect(results.length).toBeGreaterThan(0);
+      expect(entries.length).toBeGreaterThan(0);
+      expect(text).not.toContain("Source document");
+      expect(text).toContain("---");
+    });
+
+    test("respects limit", async () => {
+      const t = initConvexTest(schema);
+
+      const { entryId: sourceId } = await addWithDummyContent(t, {
+        key: "limit-source",
+        text: "Limit test source",
+        namespace: "limit-similar",
+      });
+      await addWithDummyContent(t, {
+        key: "limit-a",
+        text: "First similar",
+        namespace: "limit-similar",
+      });
+      await addWithDummyContent(t, {
+        key: "limit-b",
+        text: "Second similar",
+        namespace: "limit-similar",
+      });
+      await addWithDummyContent(t, {
+        key: "limit-c",
+        text: "Third similar",
+        namespace: "limit-similar",
+      });
+
+      const { results, entries } = await t.action(testApi.searchSimilar, {
+        entryId: sourceId,
+        limit: 2,
+      });
+
+      expect(results).toHaveLength(2);
+      expect(entries).toHaveLength(2);
+    });
+
+    test("returns same shape as search (results, text, entries) without usage", async () => {
+      const t = initConvexTest(schema);
+
+      const { entryId } = await addWithDummyContent(t, {
+        key: "shape-test",
+        text: "Shape test content",
+        namespace: "shape-ns",
+        title: "Shape Doc",
+      });
+
+      const out = await t.action(testApi.searchSimilar, {
+        entryId,
+        limit: 5,
+      });
+
+      expect(out).toHaveProperty("results");
+      expect(out).toHaveProperty("text");
+      expect(out).toHaveProperty("entries");
+      expect(Array.isArray(out.results)).toBe(true);
+      expect(Array.isArray(out.entries)).toBe(true);
+      expect(typeof out.text).toBe("string");
+      expect(out).not.toHaveProperty("usage");
     });
   });
 });

@@ -366,47 +366,34 @@ they will see the old content results This is useful if you want to add content
 to a namespace and then immediately search for it, or if you want to add content
 to a namespace and then immediately add more content to the same namespace.
 
-## Using your own content splitter
+## Providing custom content or embeddings
 
-By default, the component uses the `defaultChunker` to split the content into
-chunks. You can pass in your own content chunks to the `add` or `addAsync`
-functions.
-
-```ts
-const chunks = await textSplitter.split(content);
-await rag.add(ctx, { namespace: "global", chunks });
-```
-
-Note: The `textSplitter` here could be LangChain, Mastra, or something custom.
-The simplest version makes an array of strings like `content.split("\n")`.
-
-Note: you can pass in an async iterator instead of an array to handle large
-content. Or use the `addAsync` function (see below).
-
-## Providing custom embeddings per-chunk
-
-In addition to the text, you can provide your own embeddings for each chunk.
-
-This can be beneficial if you want to embed something other than the chunk
-contents, e.g. a summary of each chunk.
+You can pass a single `text` string to `add` (the component will embed it), or
+pass pre-computed `content` with your own embedding and optional metadata:
 
 ```ts
-const chunks = await textSplitter.split(content);
-const chunksWithEmbeddings = await Promise.all(
-  chunks.map(async (chunk) => {
-    return {
-      ...chunk,
-      embedding: await embedSummary(chunk),
-    };
-  }),
-);
-await rag.add(ctx, { namespace: "global", chunks });
+await rag.add(ctx, {
+  namespace: "global",
+  key: "doc-1",
+  text: "Your document text",
+});
+// Or with pre-computed embedding:
+await rag.add(ctx, {
+  namespace: "global",
+  key: "doc-1",
+  content: {
+    content: { text: "Your document text", metadata: {} },
+    embedding: myEmbedding,
+    searchableText: "Your document text",
+  },
+});
 ```
 
 ## Add Entries Asynchronously using File Storage
 
-For large files, you can upload them to file storage, then provide a chunker
-action to split them into chunks.
+For large files, you can upload them to file storage, then use a content
+processor action to extract text, embed it, and index a single content row per
+entry.
 
 In `convex/http.ts`:
 
@@ -427,7 +414,7 @@ cors.route({
     const storageId = await ctx.storage.store(await request.blob());
     await rag.addAsync(ctx, {
       namespace: "all-files",
-      chunkerAction: internal.http.chunkerAction,
+      contentProcessor: internal.http.contentProcessor,
       onComplete: internal.foo.docComplete, // See next section
       metadata: { storageId },
     });
@@ -435,11 +422,21 @@ cors.route({
   }),
 });
 
-export const chunkerAction = rag.defineChunkerAction(async (ctx, args) => {
+export const contentProcessor = rag.defineContentProcessor(async (ctx, args) => {
   const storageId = args.entry.metadata!.storageId;
   const file = await ctx.storage.get(storageId);
   const text = await new TextDecoder().decode(await file!.arrayBuffer());
-  return { chunks: text.split("\n\n") };
+  const { embedding } = await embed({
+    model: openai.embedding("text-embedding-3-small"),
+    value: text,
+  });
+  return {
+    content: {
+      content: { text, metadata: args.entry.metadata ?? {} },
+      embedding,
+      searchableText: text,
+    },
+  };
 });
 
 export default cors.http;
@@ -612,30 +609,6 @@ have the more specific types, to provide type safety.
 
 In addition to the function on the `rag` instance, there are other utilities
 provided:
-
-### `defaultChunker`
-
-This is the default chunker used by the `add` and `addAsync` functions.
-
-It is customizable, but by default:
-
-- It tries to break up the text into paragraphs between 100-1k characters.
-- It will combine paragraphs to meet the minimum character count (100).
-- It will break up paragraphs into separate lines to keep it under 1k.
-- It will not split up a single line unless it's longer than 10k characters.
-
-```ts
-import { defaultChunker } from "@convex-dev/rag";
-
-const chunks = defaultChunker(text, {
-  // these are the defaults
-  minLines: 1,
-  minCharsSoftLimit: 100,
-  maxCharsSoftLimit: 1000,
-  maxCharsHardLimit: 10000,
-  delimiter: "\n\n",
-});
-```
 
 ### `hybridRank`
 

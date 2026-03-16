@@ -1,7 +1,7 @@
+import { embed } from "ai";
 import { openai } from "@ai-sdk/openai";
 import {
   contentHashFromArrayBuffer,
-  defaultChunker,
   Entry,
   EntryId,
   guessMimeTypeFromContents,
@@ -89,9 +89,6 @@ export const search = action({
     query: v.string(),
     globalNamespace: v.boolean(),
     limit: v.optional(v.number()),
-    chunkContext: v.optional(
-      v.object({ before: v.number(), after: v.number() }),
-    ),
     searchType: v.optional(vSearchType),
   },
   handler: async (ctx, args) => {
@@ -101,7 +98,6 @@ export const search = action({
       namespace: args.globalNamespace ? "global" : userId,
       query: args.query,
       limit: args.limit ?? 10,
-      chunkContext: args.chunkContext,
       searchType: args.searchType,
     });
     return { ...results, files: await toFiles(ctx, results.entries) };
@@ -114,9 +110,6 @@ export const searchFile = action({
     globalNamespace: v.boolean(),
     filename: v.string(),
     limit: v.optional(v.number()),
-    chunkContext: v.optional(
-      v.object({ before: v.number(), after: v.number() }),
-    ),
     searchType: v.optional(vSearchType),
   },
   handler: async (ctx, args) => {
@@ -127,7 +120,6 @@ export const searchFile = action({
     const results = await rag.search(ctx, {
       namespace: args.globalNamespace ? "global" : userId,
       query: args.query,
-      chunkContext: args.chunkContext ?? { before: 1, after: 1 },
       filters: [{ name: "filename", value: args.filename }],
       limit: args.limit ?? 10,
       searchType: args.searchType,
@@ -142,9 +134,6 @@ export const searchCategory = action({
     globalNamespace: v.boolean(),
     category: v.string(),
     limit: v.optional(v.number()),
-    chunkContext: v.optional(
-      v.object({ before: v.number(), after: v.number() }),
-    ),
     searchType: v.optional(vSearchType),
   },
   handler: async (ctx, args) => {
@@ -157,7 +146,6 @@ export const searchCategory = action({
       query: args.query,
       limit: args.limit ?? 10,
       filters: [{ name: "category", value: args.category }],
-      chunkContext: args.chunkContext,
       searchType: args.searchType,
     });
     return { ...results, files: await toFiles(ctx, results.entries) };
@@ -178,9 +166,6 @@ export const askQuestion = action({
       ),
     ),
     limit: v.optional(v.number()),
-    chunkContext: v.optional(
-      v.object({ before: v.number(), after: v.number() }),
-    ),
     searchType: v.optional(vSearchType),
   },
   handler: async (ctx, args) => {
@@ -191,7 +176,6 @@ export const askQuestion = action({
         namespace: args.globalNamespace ? "global" : userId,
         filters: args.filter ? [args.filter] : [],
         limit: args.limit ?? 10,
-        chunkContext: args.chunkContext ?? { before: 1, after: 1 },
         searchType: args.searchType,
       },
       prompt: args.prompt,
@@ -235,7 +219,7 @@ export async function addFileAsync(
     console.debug("entry already exists, skipping async add");
     return { entryId: existing.entryId };
   }
-  // If it doesn't exist, we need to store the file and chunk it asynchronously.
+  // If it doesn't exist, we need to store the file and index it asynchronously.
   const storageId = await ctx.storage.store(
     new Blob([bytes], { type: blob.type }),
   );
@@ -248,13 +232,13 @@ export async function addFileAsync(
       { name: "category", value: category ?? null },
     ],
     metadata: { storageId, uploadedBy: userId },
-    chunkerAction: internal.example.chunkerAction,
+    contentProcessor: internal.example.contentProcessor,
     onComplete: internal.example.recordUploadMetadata,
   });
   return { url: (await ctx.storage.getUrl(storageId))!, entryId };
 }
 
-export const chunkerAction = rag.defineChunkerAction(async (ctx, args) => {
+export const contentProcessor = rag.defineContentProcessor(async (ctx, args) => {
   assert(args.entry.metadata, "Entry metadata not found");
   const storageId = args.entry.metadata.storageId;
   const metadata = await ctx.storage.getMetadata(storageId);
@@ -264,7 +248,17 @@ export const chunkerAction = rag.defineChunkerAction(async (ctx, args) => {
     filename: args.entry.title!,
     mimeType: metadata.contentType!,
   });
-  return { chunks: defaultChunker(text) };
+  const { embedding } = await embed({
+    model: openai.embedding("text-embedding-3-small"),
+    value: text,
+  });
+  return {
+    content: {
+      content: { text, metadata: args.entry.metadata ?? {} },
+      embedding,
+      searchableText: text,
+    },
+  };
 });
 
 /**
@@ -373,24 +367,6 @@ async function toFile(
     url: await ctx.storage.getUrl(storageId),
   };
 }
-
-export const listChunks = query({
-  args: {
-    entryId: vEntryId,
-    paginationOpts: paginationOptsValidator,
-    order: v.union(v.literal("desc"), v.literal("asc")),
-  },
-  handler: async (ctx, args) => {
-    const userId = await getUserId(ctx);
-    if (!userId) throw new Error("Unauthorized");
-    const paginatedChunks = await rag.listChunks(ctx, {
-      entryId: args.entryId,
-      paginationOpts: args.paginationOpts,
-      order: args.order,
-    });
-    return paginatedChunks;
-  },
-});
 
 /**
  * Entry metadata handling

@@ -39,6 +39,14 @@ describe("entries", () => {
     };
   }
 
+  function testContentArgs(text = "Test content") {
+    return {
+      content: { text, metadata: {} as Record<string, unknown> },
+      embedding: Array.from({ length: 128 }, () => 0.1),
+      searchableText: text,
+    };
+  }
+
   test("add creates a new entry when none exists", async () => {
     const t = initConvexTest();
     const namespaceId = await setupTestNamespace(t);
@@ -47,7 +55,7 @@ describe("entries", () => {
 
     const result = await t.mutation(api.entries.add, {
       entry,
-      allChunks: [],
+      content: testContentArgs(),
     });
 
     expect(result.created).toBe(true);
@@ -74,7 +82,7 @@ describe("entries", () => {
     // First add
     const firstResult = await t.mutation(api.entries.add, {
       entry,
-      allChunks: [],
+      content: testContentArgs(),
     });
 
     expect(firstResult.created).toBe(true);
@@ -83,7 +91,7 @@ describe("entries", () => {
     // Second add with identical content
     const secondResult = await t.mutation(api.entries.add, {
       entry,
-      allChunks: [],
+      content: testContentArgs(),
     });
 
     expect(secondResult.created).toBe(false);
@@ -116,7 +124,7 @@ describe("entries", () => {
     // First add
     const firstResult = await t.mutation(api.entries.add, {
       entry,
-      allChunks: [],
+      content: testContentArgs(),
     });
 
     expect(firstResult.created).toBe(true);
@@ -129,7 +137,6 @@ describe("entries", () => {
 
     const secondResult = await t.mutation(api.entries.add, {
       entry: modifiedEntry,
-      allChunks: [],
     });
 
     expect(secondResult.created).toBe(true);
@@ -164,7 +171,7 @@ describe("entries", () => {
     // First add
     const firstResult = await t.mutation(api.entries.add, {
       entry,
-      allChunks: [],
+      content: testContentArgs(),
     });
     expect(firstResult.status).toBe("ready");
     const first = await t.run(async (ctx) => {
@@ -181,7 +188,6 @@ describe("entries", () => {
 
     const secondResult = await t.mutation(api.entries.add, {
       entry: modifiedEntry,
-      allChunks: [],
     });
 
     expect(secondResult.created).toBe(true);
@@ -211,7 +217,7 @@ describe("entries", () => {
     // First add
     const firstResult = await t.mutation(api.entries.add, {
       entry,
-      allChunks: [],
+      content: testContentArgs(),
     });
     expect(firstResult.status).toBe("ready");
 
@@ -223,7 +229,6 @@ describe("entries", () => {
 
     const secondResult = await t.mutation(api.entries.add, {
       entry: modifiedEntry,
-      allChunks: [],
     });
 
     expect(secondResult.created).toBe(true);
@@ -241,7 +246,7 @@ describe("entries", () => {
     expect(newDoc!.filterValues[0].value).toBe("test");
   });
 
-  test("add without allChunks creates pending entry", async () => {
+  test("add without content creates pending entry", async () => {
     const t = initConvexTest();
     const namespaceId = await setupTestNamespace(t);
 
@@ -249,7 +254,7 @@ describe("entries", () => {
 
     const result = await t.mutation(api.entries.add, {
       entry,
-      // No allChunks provided
+      // No content provided
     });
 
     expect(result.created).toBe(true);
@@ -272,12 +277,12 @@ describe("entries", () => {
 
     const result1 = await t.mutation(api.entries.add, {
       entry: entry1,
-      allChunks: [],
+      content: testContentArgs("content 1"),
     });
 
     const result2 = await t.mutation(api.entries.add, {
       entry: entry2,
-      allChunks: [],
+      content: testContentArgs("content 2"),
     });
 
     expect(result1.created).toBe(true);
@@ -308,13 +313,13 @@ describe("entries", () => {
     // First add - create as ready
     const firstResult = await t.mutation(api.entries.add, {
       entry,
-      allChunks: [],
+      content: testContentArgs(),
     });
 
     expect(firstResult.created).toBe(true);
     expect(firstResult.status).toBe("ready");
 
-    // Second add - create as pending (no allChunks)
+    // Second add - create as pending (no content)
     const modifiedEntry = {
       ...entry,
       contentHash: "hash456",
@@ -322,17 +327,25 @@ describe("entries", () => {
 
     const pendingResult = await t.mutation(api.entries.add, {
       entry: modifiedEntry,
-      // No allChunks - creates pending entry
     });
 
     expect(pendingResult.created).toBe(true);
     expect(pendingResult.status).toBe("pending");
 
-    const chunksResult = await t.mutation(api.chunks.replaceChunksPage, {
+    // Insert content for the pending entry, then replace and promote
+    await t.mutation(api.content.insert, {
       entryId: pendingResult.entryId,
-      startOrder: 0,
+      content: {
+        content: { text: "Pending entry content" },
+        embedding: Array.from({ length: 128 }, () => 0.5),
+        searchableText: "Pending entry content",
+      },
     });
-    expect(chunksResult.status).toBe("ready");
+
+    const replaceResult = await t.mutation(api.content.replaceContent, {
+      entryId: pendingResult.entryId,
+    });
+    expect(replaceResult.status).toBe("ready");
 
     // Promote to ready - this should replace the first entry
     const promoteResult = await t.mutation(api.entries.promoteToReady, {
@@ -349,134 +362,108 @@ describe("entries", () => {
     expect(firstDoc!.status.kind).toBe("replaced");
   });
 
-  test("deleteAsync deletes entry and all chunks", async () => {
+  test("deleteAsync deletes entry and content", async () => {
     const t = initConvexTest();
     const namespaceId = await setupTestNamespace(t);
 
     const entry = testEntryArgs(namespaceId);
 
-    // Create entry with chunks
-    const testChunks = [
-      {
-        content: { text: "chunk 1 content", metadata: { type: "text" } },
-        embedding: Array.from({ length: 128 }, () => Math.random()),
-        searchableText: "chunk 1 content",
-      },
-      {
-        content: { text: "chunk 2 content", metadata: { type: "text" } },
-        embedding: Array.from({ length: 128 }, () => Math.random()),
-        searchableText: "chunk 2 content",
-      },
-    ];
+    const testContent = {
+      content: { text: "async content", metadata: { type: "text" } },
+      embedding: Array.from({ length: 128 }, () => Math.random()),
+      searchableText: "async content",
+    };
 
     const result = await t.mutation(api.entries.add, {
       entry,
-      allChunks: testChunks,
+      content: testContent,
     });
 
     expect(result.created).toBe(true);
     expect(result.status).toBe("ready");
 
-    // Verify entry and chunks exist before deletion
     const entryBefore = await t.run(async (ctx) => {
       return ctx.db.get(result.entryId);
     });
     expect(entryBefore).toBeDefined();
 
-    const chunksBefore = await t.run(async (ctx) => {
+    const contentBefore = await t.run(async (ctx) => {
       return ctx.db
-        .query("chunks")
-        .filter((q) => q.eq(q.field("entryId"), result.entryId))
+        .query("content")
+        .withIndex("entryId", (q) => q.eq("entryId", result.entryId))
         .collect();
     });
-    expect(chunksBefore).toHaveLength(2);
+    expect(contentBefore).toHaveLength(1);
 
-    // Delete the entry
     await t.mutation(api.entries.deleteAsync, {
       entryId: result.entryId,
-      startOrder: 0,
     });
 
-    // Wait for async deletion to complete by repeatedly checking
     await t.finishInProgressScheduledFunctions();
 
-    // Verify entry is deleted
     const entryAfter = await t.run(async (ctx) => {
       return ctx.db.get(result.entryId);
     });
     expect(entryAfter).toBeNull();
 
-    // Verify chunks are deleted
-    const chunksAfter = await t.run(async (ctx) => {
+    const contentAfter = await t.run(async (ctx) => {
       return ctx.db
-        .query("chunks")
-        .filter((q) => q.eq(q.field("entryId"), result.entryId))
+        .query("content")
+        .withIndex("entryId", (q) => q.eq("entryId", result.entryId))
         .collect();
     });
-    expect(chunksAfter).toHaveLength(0);
+    expect(contentAfter).toHaveLength(0);
   });
 
-  test("deleteSync deletes entry and all chunks synchronously", async () => {
+  test("deleteSync deletes entry and content synchronously", async () => {
     const t = initConvexTest();
     const namespaceId = await setupTestNamespace(t);
 
     const entry = testEntryArgs(namespaceId);
 
-    // Create entry with chunks
-    const testChunks = [
-      {
-        content: { text: "sync chunk 1", metadata: { type: "text" } },
-        embedding: Array.from({ length: 128 }, () => Math.random()),
-        searchableText: "sync chunk 1",
-      },
-      {
-        content: { text: "sync chunk 2", metadata: { type: "text" } },
-        embedding: Array.from({ length: 128 }, () => Math.random()),
-        searchableText: "sync chunk 2",
-      },
-    ];
+    const testContent = {
+      content: { text: "sync content", metadata: { type: "text" } },
+      embedding: Array.from({ length: 128 }, () => Math.random()),
+      searchableText: "sync content",
+    };
 
     const result = await t.mutation(api.entries.add, {
       entry,
-      allChunks: testChunks,
+      content: testContent,
     });
 
     expect(result.created).toBe(true);
     expect(result.status).toBe("ready");
 
-    // Verify entry and chunks exist before deletion
     const entryBefore = await t.run(async (ctx) => {
       return ctx.db.get(result.entryId);
     });
     expect(entryBefore).toBeDefined();
 
-    const chunksBefore = await t.run(async (ctx) => {
+    const contentBefore = await t.run(async (ctx) => {
       return ctx.db
-        .query("chunks")
-        .filter((q) => q.eq(q.field("entryId"), result.entryId))
+        .query("content")
+        .withIndex("entryId", (q) => q.eq("entryId", result.entryId))
         .collect();
     });
-    expect(chunksBefore).toHaveLength(2);
+    expect(contentBefore).toHaveLength(1);
 
-    // Delete the entry synchronously
     await t.action(api.entries.deleteSync, {
       entryId: result.entryId,
     });
 
-    // Verify entry is deleted
     const entryAfter = await t.run(async (ctx) => {
       return ctx.db.get(result.entryId);
     });
     expect(entryAfter).toBeNull();
 
-    // Verify chunks are deleted
-    const chunksAfter = await t.run(async (ctx) => {
+    const contentAfter = await t.run(async (ctx) => {
       return ctx.db
-        .query("chunks")
-        .filter((q) => q.eq(q.field("entryId"), result.entryId))
+        .query("content")
+        .withIndex("entryId", (q) => q.eq("entryId", result.entryId))
         .collect();
     });
-    expect(chunksAfter).toHaveLength(0);
+    expect(contentAfter).toHaveLength(0);
   });
 
   test("deleteByKeyAsync deletes all entries with the given key", async () => {
@@ -493,34 +480,28 @@ describe("entries", () => {
     // Create multiple entries with same key and one with different key
     const result1 = await t.mutation(api.entries.add, {
       entry: entry1,
-      allChunks: [
-        {
-          content: { text: "content 1" },
-          embedding: Array.from({ length: 128 }, () => Math.random()),
-        },
-      ],
+      content: {
+        content: { text: "content 1" },
+        embedding: Array.from({ length: 128 }, () => Math.random()),
+      },
     });
     expect(result1.status).toBe("ready");
 
     const result2 = await t.mutation(api.entries.add, {
       entry: entry2,
-      allChunks: [
-        {
-          content: { text: "content 2" },
-          embedding: Array.from({ length: 128 }, () => Math.random()),
-        },
-      ],
+      content: {
+        content: { text: "content 2" },
+        embedding: Array.from({ length: 128 }, () => Math.random()),
+      },
     });
     expect(result2.status).toBe("pending");
 
     const result3 = await t.mutation(api.entries.add, {
       entry: entry3,
-      allChunks: [
-        {
-          content: { text: "content 3" },
-          embedding: Array.from({ length: 128 }, () => Math.random()),
-        },
-      ],
+      content: {
+        content: { text: "content 3" },
+        embedding: Array.from({ length: 128 }, () => Math.random()),
+      },
     });
     expect(result3.status).toBe("ready");
 
@@ -567,11 +548,11 @@ describe("entries", () => {
     );
     expect(sharedAfter).toHaveLength(0);
 
-    // Verify chunks from deleted entries are also deleted
-    const chunksAfter = await t.run(async (ctx) => {
-      return ctx.db.query("chunks").collect();
+    // Verify content from deleted entries are also deleted
+    const contentAfter = await t.run(async (ctx) => {
+      return ctx.db.query("content").collect();
     });
-    expect(chunksAfter).toHaveLength(1); // Only chunk from entry3 should remain
+    expect(contentAfter).toHaveLength(1); // Only content from entry3 should remain
   });
 
   test("deleteByKeySync deletes all entries with the given key synchronously", async () => {
@@ -588,34 +569,28 @@ describe("entries", () => {
     // Create multiple entries with same key and one with different key
     const result1 = await t.mutation(api.entries.add, {
       entry: entry1,
-      allChunks: [
-        {
-          content: { text: "sync content 1" },
-          embedding: Array.from({ length: 128 }, () => Math.random()),
-        },
-      ],
+      content: {
+        content: { text: "sync content 1" },
+        embedding: Array.from({ length: 128 }, () => Math.random()),
+      },
     });
     expect(result1.status).toBe("ready");
 
     const result2 = await t.mutation(api.entries.add, {
       entry: entry2,
-      allChunks: [
-        {
-          content: { text: "sync content 2" },
-          embedding: Array.from({ length: 128 }, () => Math.random()),
-        },
-      ],
+      content: {
+        content: { text: "sync content 2" },
+        embedding: Array.from({ length: 128 }, () => Math.random()),
+      },
     });
     expect(result2.status).toBe("pending");
 
     const result3 = await t.mutation(api.entries.add, {
       entry: entry3,
-      allChunks: [
-        {
-          content: { text: "sync content 3" },
-          embedding: Array.from({ length: 128 }, () => Math.random()),
-        },
-      ],
+      content: {
+        content: { text: "sync content 3" },
+        embedding: Array.from({ length: 128 }, () => Math.random()),
+      },
     });
     expect(result3.status).toBe("ready");
 
@@ -645,11 +620,11 @@ describe("entries", () => {
     expect(entriesAfter[0].key).toBe("keep-key");
     expect(entriesAfter[0]._id).toBe(result3.entryId);
 
-    // Verify chunks from deleted entries are also deleted
-    const chunksAfter = await t.run(async (ctx) => {
-      return ctx.db.query("chunks").collect();
+    // Verify content from deleted entries are also deleted
+    const contentAfter = await t.run(async (ctx) => {
+      return ctx.db.query("content").collect();
     });
-    expect(chunksAfter).toHaveLength(1); // Only chunk from entry3 should remain
+    expect(contentAfter).toHaveLength(1); // Only content from entry3 should remain
   });
 
   test("deleteByKeyAsync handles entries without key gracefully", async () => {
@@ -662,13 +637,12 @@ describe("entries", () => {
     // Create entries
     const result1 = await t.mutation(api.entries.add, {
       entry: entryWithKey,
-      allChunks: [],
+      content: testContentArgs(),
     });
     expect(result1.status).toBe("ready");
 
     const result2 = await t.mutation(api.entries.add, {
       entry: entryWithoutKey,
-      allChunks: [],
     });
 
     // Delete by key - should only affect entries with that key
@@ -700,19 +674,17 @@ describe("entries", () => {
     // Create multiple versions of the same entry
     const result1 = await t.mutation(api.entries.add, {
       entry,
-      allChunks: [],
+      content: testContentArgs(),
     });
     expect(result1.status).toBe("ready");
 
     const result2 = await t.mutation(api.entries.add, {
       entry: { ...entry, contentHash: "hash456" },
-      allChunks: [],
     });
     expect(result2.status).toBe("pending");
 
     const result3 = await t.mutation(api.entries.add, {
       entry: { ...entry, contentHash: "hash789" },
-      allChunks: [],
     });
 
     // Get the versions to understand ordering

@@ -23,56 +23,26 @@ import type { FunctionReference } from "convex/server";
  */
 export type ComponentApi<Name extends string | undefined = string | undefined> =
   {
-    chunks: {
+    content: {
       insert: FunctionReference<
         "mutation",
         "internal",
         {
-          chunks: Array<{
+          content: {
             content: { metadata?: Record<string, any>; text: string };
             embedding: Array<number>;
             searchableText?: string;
-          }>;
+          };
           entryId: string;
-          startOrder: number;
         },
         { status: "pending" | "ready" | "replaced" },
         Name
       >;
-      list: FunctionReference<
-        "query",
-        "internal",
-        {
-          entryId: string;
-          order: "desc" | "asc";
-          paginationOpts: {
-            cursor: string | null;
-            endCursor?: string | null;
-            id?: number;
-            maximumBytesRead?: number;
-            maximumRowsRead?: number;
-            numItems: number;
-          };
-        },
-        {
-          continueCursor: string;
-          isDone: boolean;
-          page: Array<{
-            metadata?: Record<string, any>;
-            order: number;
-            state: "pending" | "ready" | "replaced";
-            text: string;
-          }>;
-          pageStatus?: "SplitRecommended" | "SplitRequired" | null;
-          splitCursor?: string | null;
-        },
-        Name
-      >;
-      replaceChunksPage: FunctionReference<
+      replaceContent: FunctionReference<
         "mutation",
         "internal",
-        { entryId: string; startOrder: number },
-        { nextStartOrder: number; status: "pending" | "ready" | "replaced" },
+        { entryId: string },
+        { status: "pending" | "ready" | "replaced" },
         Name
       >;
     };
@@ -81,11 +51,11 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "mutation",
         "internal",
         {
-          allChunks?: Array<{
+          content?: {
             content: { metadata?: Record<string, any>; text: string };
             embedding: Array<number>;
             searchableText?: string;
-          }>;
+          };
           entry: {
             contentHash?: string;
             filterValues: Array<{ name: string; value: any }>;
@@ -108,7 +78,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "mutation",
         "internal",
         {
-          chunker: string;
+          contentProcessor: string;
           entry: {
             contentHash?: string;
             filterValues: Array<{ name: string; value: any }>;
@@ -126,7 +96,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       deleteAsync: FunctionReference<
         "mutation",
         "internal",
-        { entryId: string; startOrder: number },
+        { entryId: string },
         null,
         Name
       >;
@@ -434,11 +404,38 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             title?: string;
           }>;
           results: Array<{
-            content: Array<{ metadata?: Record<string, any>; text: string }>;
+            content: { metadata?: Record<string, any>; text: string };
             entryId: string;
-            order: number;
             score: number;
-            startOrder: number;
+          }>;
+        },
+        Name
+      >;
+      searchSimilar: FunctionReference<
+        "action",
+        "internal",
+        {
+          entryId: string;
+          filters: Array<{ name: string; value: any }>;
+          limit: number;
+          vectorScoreThreshold?: number;
+        },
+        {
+          entries: Array<{
+            contentHash?: string;
+            entryId: string;
+            filterValues: Array<{ name: string; value: any }>;
+            importance: number;
+            key?: string;
+            metadata?: Record<string, any>;
+            replacedAt?: number;
+            status: "pending" | "ready" | "replaced";
+            title?: string;
+          }>;
+          results: Array<{
+            content: { metadata?: Record<string, any>; text: string };
+            entryId: string;
+            score: number;
           }>;
         },
         Name

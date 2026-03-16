@@ -5,11 +5,11 @@ import {
   PaginationResult,
 } from "convex/server";
 import { v, type Value } from "convex/values";
-import type { ChunkerAction, EntryFilter, EntryId } from "../shared.js";
+import type { ContentProcessorAction, EntryFilter, EntryId } from "../shared.js";
 import {
   statuses,
   vActiveStatus,
-  vCreateChunkArgs,
+  vCreateContentArgs,
   vEntry,
   vPaginationResult,
   vStatus,
@@ -26,7 +26,7 @@ import {
   type MutationCtx,
   type QueryCtx,
 } from "./_generated/server.js";
-import { deleteChunksPageHandler, insertChunks } from "./chunks.js";
+import { deleteContentHandler, insertContent } from "./content.js";
 import schema, { type StatusWithOnComplete } from "./schema.js";
 import { mergedStream } from "convex-helpers/server/stream";
 import { stream } from "convex-helpers/server/stream";
@@ -60,7 +60,7 @@ export const addAsync = mutation({
       ...omit(schema.tables.entries.validator.fields, ["version", "status"]),
     }),
     onComplete: v.optional(v.string()),
-    chunker: v.string(),
+    contentProcessor: v.string(),
   },
   returns: v.object({
     entryId: v.id("entries"),
@@ -93,11 +93,10 @@ export const addAsync = mutation({
       version,
       status,
     });
-    const chunkerAction = args.chunker as unknown as ChunkerAction;
-    // TODO: Cancel any existing chunker actions for this entry?
+    const contentProcessorAction = args.contentProcessor as unknown as ContentProcessorAction;
     await workpool.enqueueAction(
       ctx,
-      chunkerAction,
+      contentProcessorAction,
       {
         namespace: publicNamespace(namespace),
         entry: publicEntry({
@@ -105,7 +104,7 @@ export const addAsync = mutation({
           _id: entryId,
           status: status,
         }),
-        insertChunks: await createFunctionHandle(api.chunks.insert),
+        insertContent: await createFunctionHandle(api.content.insert),
       },
       {
         name: workpoolName(namespace.namespace, args.entry.key, entryId),
@@ -137,7 +136,7 @@ export const addAsyncOnComplete = internalMutation({
     const entry = await ctx.db.get(args.context);
     if (!entry) {
       console.error(
-        `Entry ${args.context} not found when trying to complete chunker for async add`,
+        `Entry ${args.context} not found when trying to complete content processor for async add`,
       );
       return;
     }
@@ -197,8 +196,7 @@ export const add = mutation({
       ...omit(schema.tables.entries.validator.fields, ["version", "status"]),
     }),
     onComplete: v.optional(v.string()),
-    // If we can commit all chunks at the same time, the status is "ready"
-    allChunks: v.optional(v.array(vCreateChunkArgs)),
+    content: v.optional(vCreateContentArgs),
   },
   returns: v.object({
     entryId: v.id("entries"),
@@ -227,11 +225,10 @@ export const add = mutation({
       version,
       status: { kind: "pending", onComplete: args.onComplete },
     });
-    if (args.allChunks) {
-      const { status } = await insertChunks(ctx, {
+    if (args.content) {
+      const { status } = await insertContent(ctx, {
         entryId,
-        startOrder: 0,
-        chunks: args.allChunks,
+        content: args.content,
       });
       if (status === "ready") {
         await promoteToReadyHandler(ctx, { entryId });
@@ -390,8 +387,8 @@ export const findByContentHash = query({
 /**
  * Promotes a entry to ready, replacing any existing ready entry by key.
  * It will also call the associated onComplete function if it was pending.
- * Note: this will not replace the chunks automatically, so you should first
- * call `replaceChunksPage` on all its chunks.
+ * Note: this will not replace the content automatically, so you should first
+ * call `replaceContent` on its content.
  * Edge case: if the entry has already been replaced, it will return the
  * same entry (replacedEntry.entryId === args.entryId).
  */
@@ -534,7 +531,6 @@ export function publicEntry(entry: {
 export const deleteAsync = mutation({
   args: v.object({
     entryId: v.id("entries"),
-    startOrder: v.number(),
   }),
   returns: v.null(),
   handler: deleteAsyncHandler,
@@ -542,40 +538,23 @@ export const deleteAsync = mutation({
 
 async function deleteAsyncHandler(
   ctx: MutationCtx,
-  args: { entryId: Id<"entries">; startOrder: number },
+  args: { entryId: Id<"entries"> },
 ) {
-  const { entryId, startOrder } = args;
+  const { entryId } = args;
   const entry = await ctx.db.get(entryId);
   if (!entry) {
     throw new Error(`Entry ${entryId} not found`);
   }
-  const status = await deleteChunksPageHandler(ctx, { entryId, startOrder });
-  if (status.isDone) {
-    await ctx.db.delete(entryId);
-  } else {
-    await workpool.enqueueMutation(ctx, api.entries.deleteAsync, {
-      entryId,
-      startOrder: status.nextStartOrder,
-    });
-  }
+  await deleteContentHandler(ctx, { entryId });
+  await ctx.db.delete(entryId);
 }
 
 export const deleteSync = action({
   args: { entryId: v.id("entries") },
   returns: v.null(),
   handler: async (ctx, { entryId }) => {
-    let startOrder = 0;
-    while (true) {
-      const status = await ctx.runMutation(internal.chunks.deleteChunksPage, {
-        entryId,
-        startOrder,
-      });
-      if (status.isDone) {
-        await ctx.runMutation(internal.entries._del, { entryId });
-        break;
-      }
-      startOrder = status.nextStartOrder;
-    }
+    await ctx.runMutation(internal.content.deleteContent, { entryId });
+    await ctx.runMutation(internal.entries._del, { entryId });
   },
 });
 
@@ -599,7 +578,6 @@ export const deleteByKeyAsync = mutation({
     for await (const entry of entries) {
       await workpool.enqueueMutation(ctx, api.entries.deleteAsync, {
         entryId: entry._id,
-        startOrder: 0,
       });
     }
     if (entries.length === 100) {
