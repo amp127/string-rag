@@ -6,7 +6,7 @@
   "bugs": {
     "url": "https://github.com/amp127/string-rag/issues"
   },
-  "version": "0.7.1.1",
+  "version": "0.1.0",
   "publishConfig": {
     "access": "public"
   },
