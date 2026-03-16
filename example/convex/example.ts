@@ -6,7 +6,7 @@ import {
   EntryId,
   guessMimeTypeFromContents,
   guessMimeTypeFromExtension,
-  RAG,
+  StringRAG,
   SearchEntry,
   vEntryId,
   vSearchType,
@@ -35,7 +35,7 @@ export type Filters = { filename: string; category: string | null };
 
 type Metadata = { storageId: Id<"_storage">; uploadedBy: string };
 
-const rag = new RAG<Filters, Metadata>(components.rag, {
+const rag = new StringRAG<Filters, Metadata>(components.rag, {
   filterNames: ["filename", "category"],
   textEmbeddingModel: openai.embedding("text-embedding-3-small"),
   embeddingDimension: 1536,

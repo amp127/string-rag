@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { RAG, type EntryId } from "./index.js";
+import { StringRAG, type EntryId } from "./index.js";
 import type { DataModelFromSchemaDefinition } from "convex/server";
 import {
   anyApi,
@@ -26,7 +26,7 @@ const query = queryGeneric as QueryBuilder<DataModel, "public">;
 const mutation = mutationGeneric as MutationBuilder<DataModel, "public">;
 const action = actionGeneric as ActionBuilder<DataModel, "public">;
 
-const rag = new RAG(components.rag, {
+const rag = new StringRAG(components.rag, {
   embeddingDimension: 1536,
   textEmbeddingModel: openai.embedding("text-embedding-3-small"),
   filterNames: ["simpleString", "arrayOfStrings", "customObject"],
@@ -164,7 +164,7 @@ function addWithDummyContent(
   });
 }
 
-describe("RAG thick client", () => {
+describe("StringRAG thick client", () => {
   test("should add a entry and be able to list it", async () => {
     const t = initConvexTest(schema);
     const { entryId, status, usage } = await addWithDummyContent(t, {

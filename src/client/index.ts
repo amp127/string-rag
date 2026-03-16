@@ -84,7 +84,7 @@ const DEFAULT_SEARCH_LIMIT = 10;
 // Used for vector search weighting.
 type Importance = number;
 
-export class RAG<
+export class StringRAG<
   FitlerSchemas extends Record<string, Value> = Record<string, Value>,
   EntryMetadata extends Record<string, Value> = Record<string, Value>,
 > {
@@ -326,7 +326,7 @@ export class RAG<
       /**
        * The namespace to search in. e.g. a userId if entries are per-user.
        * Note: it will only match entries in the namespace that match the
-       * modelId, embedding dimension, and filterNames of the RAG instance.
+       * modelId, embedding dimension, and filterNames of the StringRAG instance.
        */
       namespace: string;
       /**
@@ -666,7 +666,7 @@ export class RAG<
 
   /**
    * Get a namespace that matches the modelId, embedding dimension, and
-   * filterNames of the RAG instance. If it doesn't exist, it will be created.
+   * filterNames of the StringRAG instance. If it doesn't exist, it will be created.
    */
   async getOrCreateNamespace(
     ctx: CtxWith<"runMutation">,
@@ -713,7 +713,7 @@ export class RAG<
 
   /**
    * Get a namespace that matches the modelId, embedding dimension, and
-   * filterNames of the RAG instance. If it doesn't exist, it will return null.
+   * filterNames of the StringRAG instance. If it doesn't exist, it will return null.
    */
   async getNamespace(
     ctx: CtxWith<"runQuery">,
@@ -897,6 +897,9 @@ export class RAG<
   }
 }
 
+/** @deprecated Use StringRAG instead. */
+export { StringRAG as RAG };
+
 function validateAddFilterValues(
   filterValues: NamedFilter[] | undefined,
   filterNames: string[] | undefined,
@@ -906,7 +909,7 @@ function validateAddFilterValues(
   }
   if (!filterNames) {
     throw new Error(
-      "You must provide filter names to RAG to add entries with filters.",
+      "You must provide filter names to StringRAG to add entries with filters.",
     );
   }
   const seen = new Set<string>();

@@ -46,11 +46,11 @@ Run `npx convex codegen` if `npx convex dev` isn't already running.
 ```ts
 // convex/example.ts
 import { components } from "./_generated/api";
-import { RAG } from "string-rag";
+import { StringRAG } from "string-rag";
 // Any AI SDK model that supports embeddings will work.
 import { openai } from "@ai-sdk/openai";
 
-const rag = new RAG(components.rag, {
+const rag = new StringRAG(components.rag, {
   textEmbeddingModel: openai.embedding("text-embedding-3-small"),
   embeddingDimension: 1536, // Needs to match your embedding model
 });
@@ -186,7 +186,7 @@ type FilterTypes = {
   categoryAndType: { category: string; contentType: string };
 };
 
-const rag = new RAG<FilterTypes>(components.rag, {
+const rag = new StringRAG<FilterTypes>(components.rag, {
   textEmbeddingModel: openai.embedding("text-embedding-3-small"),
   embeddingDimension: 1536, // Needs to match your embedding model
   filterNames: ["category", "contentType", "categoryAndType"],
