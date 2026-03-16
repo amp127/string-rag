@@ -735,7 +735,6 @@ export class RAG<
   async deleteAsync(ctx: CtxWith<"runMutation">, args: { entryId: EntryId }) {
     await ctx.runMutation(this.component.entries.deleteAsync, {
       entryId: args.entryId,
-      startOrder: 0,
     });
   }
 

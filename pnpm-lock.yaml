@@ -9,7 +9,7 @@ importers:
   .:
     dependencies:
       ai:
-        specifier: ^6.0.0
+        specifier: ^6.0.116
         version: 6.0.116(zod@4.3.6)
     devDependencies:
       '@ai-sdk/openai':

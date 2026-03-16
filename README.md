@@ -108,6 +108,24 @@ export const search = action({
 });
 ```
 
+### Search for similar entries
+
+When you already have an entry (e.g. from a previous search or from `rag.add`), you can find similar entries using its stored embedding—no query string or embedding API call needed. The source entry is excluded from results. Same filters, limit, and `vectorScoreThreshold` as `search`.
+
+```ts
+export const findSimilar = action({
+  args: { entryId: v.string() },
+  handler: async (ctx, args) => {
+    const { results, text, entries } = await rag.searchSimilar(ctx, {
+      entryId: args.entryId,
+      limit: 5,
+      filters: [{ name: "category", value: "articles" }], // optional
+    });
+    return { results, text, entries };
+  },
+});
+```
+
 ## Generate a response based on RAG context
 
 Once you have searched for the context, you can use it with an LLM.

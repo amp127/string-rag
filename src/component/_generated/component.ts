@@ -378,7 +378,6 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "action",
         "internal",
         {
-          chunkContext?: { after: number; before: number };
           dimension?: number;
           embedding?: Array<number>;
           filters: Array<{ name: string; value: any }>;
