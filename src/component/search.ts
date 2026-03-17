@@ -20,6 +20,7 @@ import { type vContentResult } from "./content.js";
 import { publicEntry } from "./entries.js";
 import { hybridRank } from "../client/hybridRank.js";
 import { vVectorId, type VectorTableId } from "./embeddings/tables.js";
+import { getPendingEmbeddingForContent } from "./pendingEmbedding.js";
 
 export const search = action({
   args: {
@@ -351,9 +352,19 @@ export const getEntryEmbedding = internalQuery({
 
     let embedding: number[];
     switch (content.state.kind) {
-      case "pending":
-        embedding = content.state.embedding;
+      case "pending": {
+        const pending = await getPendingEmbeddingForContent(
+          ctx,
+          content._id,
+        );
+        if (!pending) {
+          throw new Error(
+            `No pending embedding stored for content ${content._id}`,
+          );
+        }
+        embedding = pending;
         break;
+      }
       case "ready": {
         const vector = await ctx.db.get(content.state.embeddingId);
         if (!vector) {
@@ -431,9 +442,19 @@ export const getEntryEmbeddingByKey = internalQuery({
 
     let embedding: number[];
     switch (content.state.kind) {
-      case "pending":
-        embedding = content.state.embedding;
+      case "pending": {
+        const pending = await getPendingEmbeddingForContent(
+          ctx,
+          content._id,
+        );
+        if (!pending) {
+          throw new Error(
+            `No pending embedding stored for content ${content._id}`,
+          );
+        }
+        embedding = pending;
         break;
+      }
       case "ready": {
         const vector = await ctx.db.get(content.state.embeddingId);
         if (!vector) {

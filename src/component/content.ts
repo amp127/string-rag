@@ -18,6 +18,10 @@ import {
   filterFieldsFromNumbers,
   numberedFilterFromNamedFilters,
 } from "./filters.js";
+import {
+  deletePendingEmbeddingForContent,
+  insertPendingEmbedding,
+} from "./pendingEmbedding.js";
 
 export const vInsertContentArgs = v.object({
   entryId: v.id("entries"),
@@ -54,6 +58,8 @@ export async function insertContent(
   if (existingContent) {
     if (existingContent.state.kind === "ready") {
       await ctx.db.delete(existingContent.state.embeddingId);
+    } else if (existingContent.state.kind === "pending") {
+      await deletePendingEmbeddingForContent(ctx, existingContent._id);
     }
     await ctx.db.delete(existingContent._id);
   }
@@ -63,12 +69,6 @@ export async function insertContent(
     namespace.filterNames,
   );
 
-  let state: Doc<"content">["state"] = {
-    kind: "pending",
-    embedding: content.embedding,
-    importance: entry.importance,
-    pendingSearchableText: content.searchableText,
-  };
   if (!previousEntry) {
     const embeddingId = await insertEmbedding(
       ctx,
@@ -77,21 +77,32 @@ export async function insertContent(
       entry.importance,
       numberedFilter,
     );
-    state = {
-      kind: "ready",
-      embeddingId,
-      searchableText: content.searchableText,
-    };
+    await ctx.db.insert("content", {
+      entryId,
+      text: content.content.text,
+      metadata: content.content.metadata,
+      state: {
+        kind: "ready",
+        embeddingId,
+        searchableText: content.searchableText,
+      },
+      namespaceId: entry.namespaceId,
+      ...filterFieldsFromNumbers(entry.namespaceId, numberedFilter),
+    });
+  } else {
+    const contentId = await ctx.db.insert("content", {
+      entryId,
+      text: content.content.text,
+      metadata: content.content.metadata,
+      state: {
+        kind: "pending",
+        searchableText: content.searchableText,
+      },
+      namespaceId: entry.namespaceId,
+      ...filterFieldsFromNumbers(entry.namespaceId, numberedFilter),
+    });
+    await insertPendingEmbedding(ctx, contentId, content.embedding);
   }
-
-  await ctx.db.insert("content", {
-    entryId,
-    text: content.content.text,
-    metadata: content.content.metadata,
-    state,
-    namespaceId: entry.namespaceId,
-    ...filterFieldsFromNumbers(entry.namespaceId, numberedFilter),
-  });
 
   return { status: previousEntry ? ("pending" as const) : ("ready" as const) };
 }
@@ -155,18 +166,28 @@ export async function replaceContentHandler(
   }
 
   if (contentDoc.state.kind === "pending") {
+    const pendingEmbedding = await ctx.db
+      .query("pendingContentEmbeddings")
+      .withIndex("by_contentId", (q) => q.eq("contentId", contentDoc._id))
+      .first();
+    if (!pendingEmbedding) {
+      throw new Error(
+        `Missing pending embedding row for content ${contentDoc._id}`,
+      );
+    }
     const embeddingId = await insertEmbedding(
       ctx,
-      contentDoc.state.embedding,
+      pendingEmbedding.embedding,
       entry.namespaceId,
       entry.importance,
       numberedFilter,
     );
+    await ctx.db.delete(pendingEmbedding._id);
     await ctx.db.patch(contentDoc._id, {
       state: {
         kind: "ready",
         embeddingId,
-        searchableText: contentDoc.state.pendingSearchableText,
+        searchableText: contentDoc.state.searchableText,
       },
     });
   }
@@ -288,6 +309,8 @@ export async function deleteContentHandler(
     if (embedding) {
       await ctx.db.delete(contentDoc.state.embeddingId);
     }
+  } else if (contentDoc.state.kind === "pending") {
+    await deletePendingEmbeddingForContent(ctx, contentDoc._id);
   }
   await ctx.db.delete(contentDoc._id);
   return { isDone: true };

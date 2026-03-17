@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.6
+
+- **Breaking (component schema):** Pending content `state` is now only
+  `{ kind: "pending", searchableText? }` (no inline embedding/importance).
+  Vectors are stored in `pendingContentEmbeddings` until `replaceContent`
+  runs. Existing DB rows in the old pending shape must be migrated or
+  re-written.
+
 ## 0.1.5
 
 - **Batch client APIs** (single namespace per call): `addMany` (one namespace

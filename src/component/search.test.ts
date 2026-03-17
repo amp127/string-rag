@@ -725,17 +725,19 @@ describe("search", () => {
       });
       const embedding = Array(128).fill(0.3);
       await t.run(async (ctx) => {
-        await ctx.db.insert("content", {
+        const contentId = await ctx.db.insert("content", {
           entryId,
           text: "Pending text",
           metadata: {},
           namespaceId,
           state: {
             kind: "pending",
-            embedding,
-            importance: 1,
-            pendingSearchableText: "Pending text",
+            searchableText: "Pending text",
           },
+        });
+        await ctx.db.insert("pendingContentEmbeddings", {
+          contentId,
+          embedding,
         });
       });
 

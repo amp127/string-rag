@@ -56,6 +56,11 @@ export const schema = defineSchema({
     ])
     // To look up most recently changed entries
     .index("status_namespaceId", ["status.kind", "namespaceId"]),
+  /** Holds raw embedding until pending content is promoted to ready (keeps content.state small). */
+  pendingContentEmbeddings: defineTable({
+    contentId: v.id("content"),
+    embedding: v.array(v.number()),
+  }).index("by_contentId", ["contentId"]),
   content: defineTable({
     entryId: v.id("entries"),
     text: v.string(),
@@ -63,9 +68,7 @@ export const schema = defineSchema({
     state: v.union(
       v.object({
         kind: v.literal("pending"),
-        embedding: v.array(v.number()),
-        importance: v.number(),
-        pendingSearchableText: v.optional(v.string()),
+        searchableText: v.optional(v.string()),
       }),
       v.object({
         kind: v.literal("ready"),

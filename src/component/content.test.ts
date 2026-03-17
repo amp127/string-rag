@@ -160,6 +160,25 @@ describe("content", () => {
       });
     });
 
+    const beforeReplace = await t.run(async (ctx) => {
+      const c = await ctx.db
+        .query("content")
+        .withIndex("entryId", (q) => q.eq("entryId", docV2Id))
+        .first();
+      const pending = c
+        ? await ctx.db
+            .query("pendingContentEmbeddings")
+            .withIndex("by_contentId", (q) => q.eq("contentId", c._id))
+            .first()
+        : null;
+      return { content: c, pending };
+    });
+    expect(beforeReplace.content?.state).toEqual({
+      kind: "pending",
+      searchableText: "Version 2 content",
+    });
+    expect(beforeReplace.pending?.embedding).toEqual(Array(128).fill(0.2));
+
     await t.mutation(api.content.replaceContent, { entryId: docV2Id });
 
     const v2Content = await t.run(async (ctx) => {
