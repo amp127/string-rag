@@ -80,6 +80,14 @@ export {
 
 const DEFAULT_SEARCH_LIMIT = 10;
 
+/** Max entries per addMany/deleteMany to stay within Convex mutation limits. */
+export const DEFAULT_ADD_MANY_BATCH_SIZE = 100;
+
+type DoEmbedResult = {
+  embeddings: number[][];
+  usage?: { tokens: number };
+};
+
 /**
  * Embed a single value. Uses the model's doEmbed when the model is an object
  * so we avoid the AI SDK's embed() path that calls logWarnings with possibly
@@ -89,26 +97,53 @@ async function embedSafe(params: {
   model: EmbeddingModel;
   value: string;
 }): Promise<{ embedding: number[]; usage?: EmbeddingModelUsage }> {
-  const { model, value } = params;
+  const result = await embedManySafe({
+    model: params.model,
+    values: [params.value],
+  });
+  const embedding = result.embeddings[0];
+  if (!embedding) {
+    throw new Error("Embedding model returned no embedding");
+  }
+  return {
+    embedding,
+    usage: result.usage,
+  };
+}
+
+/**
+ * Embed multiple values in one call when the model supports doEmbed(values).
+ * Reduces API calls and latency when adding many entries. Falls back to
+ * embedding one-by-one when the model does not support batch embed.
+ */
+async function embedManySafe(params: {
+  model: EmbeddingModel;
+  values: string[];
+}): Promise<{
+  embeddings: number[][];
+  usage?: EmbeddingModelUsage;
+}> {
+  const { model, values } = params;
+  if (values.length === 0) {
+    return { embeddings: [], usage: { tokens: 0 } };
+  }
   if (typeof model === "object" && model !== null && "doEmbed" in model) {
     const result = await (
-      model as {
-        doEmbed(options: { values: string[] }): PromiseLike<{
-          embeddings: number[][];
-          usage?: { tokens: number };
-        }>;
-      }
-    ).doEmbed({ values: [value] });
-    const embedding = result.embeddings[0];
-    if (!embedding) {
-      throw new Error("Embedding model returned no embedding");
-    }
+      model as { doEmbed(options: { values: string[] }): PromiseLike<DoEmbedResult> }
+    ).doEmbed({ values });
     return {
-      embedding,
+      embeddings: result.embeddings,
       usage: result.usage ?? { tokens: 0 },
     };
   }
-  return embed({ model, value });
+  const results = await Promise.all(
+    values.map((value) => embed({ model, value })),
+  );
+  const embeddings = results.map((r) => r.embedding);
+  const usage: EmbeddingModelUsage = {
+    tokens: results.reduce((sum, r) => sum + (r.usage?.tokens ?? 0), 0),
+  };
+  return { embeddings, usage };
 }
 
 // This is 0-1 with 1 being the most important and 0 being totally irrelevant.
@@ -128,6 +163,8 @@ export class StringRAG<
    *
    * The filterNames need to match the names of the filters you provide when
    * adding and when searching. Use the type parameter to make this type safe.
+   * Order matters: it defines which internal slot each name maps to (filter0,
+   * filter1, …). Keep the same order for a given namespace; see docs/filters.md.
    *
    * The second type parameter makes the entry metadata type safe. E.g. you can
    * do rag.add(ctx, {
@@ -143,6 +180,7 @@ export class StringRAG<
     public options: {
       embeddingDimension: number;
       textEmbeddingModel: EmbeddingModel;
+      /** Ordered list of filter names for this RAG. Order is fixed per namespace (see docs/filters.md). */
       filterNames?: FilterNames<FitlerSchemas>;
     },
   ) {}
@@ -269,6 +307,143 @@ export class StringRAG<
   }
 
   /**
+   * Add multiple entries to the store in one namespace with a single
+   * namespace lookup and a single batch embedding call when using text.
+   * Reduces function calls and database bandwidth compared to calling
+   * `add` repeatedly. Limited to one namespace; all items use the same
+   * namespace. Batch size is capped at `DEFAULT_ADD_MANY_BATCH_SIZE`.
+   *
+   * Each item can have `text` (embedded in one batch) or pre-computed
+   * `content`. Optional `onComplete` per item is supported.
+   */
+  async addMany(
+    ctx: CtxWith<"runMutation">,
+    args: (NamespaceSelection & { maxBatchSize?: number }) & {
+      items: Array<
+        EntryArgs<FitlerSchemas, EntryMetadata> &
+          (
+            | { text: string; content?: undefined }
+            | { content: CreateContentArgs; text?: undefined }
+          ) & { onComplete?: OnComplete }
+      >;
+    },
+  ): Promise<{
+    entryIds: EntryId[];
+    statuses: Status[];
+    created: boolean[];
+    replacedEntries: (Entry<FitlerSchemas, EntryMetadata> | null)[];
+    usage: EmbeddingModelUsage;
+  }> {
+    if (args.items.length === 0) {
+      return {
+        entryIds: [],
+        statuses: [],
+        created: [],
+        replacedEntries: [],
+        usage: { tokens: 0 },
+      };
+    }
+    const maxBatchSize =
+      args.maxBatchSize ?? DEFAULT_ADD_MANY_BATCH_SIZE;
+    if (args.items.length > maxBatchSize) {
+      throw new Error(
+        `addMany: items length ${args.items.length} exceeds maxBatchSize ${maxBatchSize}. Split into smaller batches.`,
+      );
+    }
+
+    let namespaceId: NamespaceId;
+    if ("namespaceId" in args) {
+      namespaceId = args.namespaceId;
+    } else {
+      const namespace = await this.getOrCreateNamespace(ctx, {
+        namespace: args.namespace,
+        status: "ready",
+      });
+      namespaceId = namespace.namespaceId;
+    }
+
+    for (const item of args.items) {
+      validateAddFilterValues(item.filterValues, this.options.filterNames);
+    }
+
+    const textsToEmbed = args.items
+      .map((item) => ("text" in item && item.text !== undefined ? item.text : null))
+      .filter((t): t is string => t !== null);
+    let embedResult: { embeddings: number[][]; usage?: EmbeddingModelUsage } = {
+      embeddings: [],
+      usage: { tokens: 0 },
+    };
+    if (textsToEmbed.length > 0) {
+      embedResult = await embedManySafe({
+        model: this.options.textEmbeddingModel,
+        values: textsToEmbed,
+      });
+    }
+    let embedIndex = 0;
+    const contentArgs: (CreateContentArgs | undefined)[] = args.items.map(
+      (item) => {
+        if (item.content) return item.content;
+        if ("text" in item && item.text !== undefined) {
+          const embedding = embedResult.embeddings[embedIndex];
+          if (!embedding) {
+            throw new Error("embedMany returned fewer embeddings than texts");
+          }
+          embedIndex++;
+          return {
+            content: { text: item.text },
+            embedding,
+            searchableText: item.text,
+          };
+        }
+        return undefined;
+      },
+    );
+
+    const onCompleteHandles = await Promise.all(
+      args.items.map((item) =>
+        item.onComplete ? createFunctionHandle(item.onComplete) : undefined,
+      ),
+    );
+
+    const itemsForMutation = args.items.map((item, i) => ({
+      entry: {
+        key: item.key,
+        title: item.title,
+        metadata: item.metadata,
+        filterValues: item.filterValues ?? [],
+        importance: item.importance ?? 1,
+        contentHash: item.contentHash,
+      },
+      content: contentArgs[i],
+      onComplete: onCompleteHandles[i],
+    }));
+
+    const addManyRef = this.component.entries as unknown as Record<
+      string,
+      FunctionReference<"mutation", "internal", any, any>
+    >;
+    const rawResult = (await ctx.runMutation(addManyRef.addMany, {
+      namespaceId: namespaceId as unknown as string,
+      items: itemsForMutation,
+    })) as {
+      entryIds: string[];
+      statuses: Status[];
+      created: boolean[];
+    };
+
+    return {
+      entryIds: rawResult.entryIds as EntryId[],
+      statuses: rawResult.statuses,
+      created: rawResult.created,
+      replacedEntries: rawResult.entryIds.map(() => null) as (Entry<
+        FitlerSchemas,
+        EntryMetadata
+      > | null)[],
+      usage: { tokens: embedResult.usage?.tokens ?? 0 },
+    };
+  }
+
+  /**
    * Add an entry to the store asynchronously.
    *
    * This is useful if you want to produce content in a separate process (e.g.
@@ -342,6 +517,95 @@ export class StringRAG<
       },
     );
     return { entryId: entryId as EntryId, status };
+  }
+
+  /**
+   * Add multiple entries asynchronously via content processors. One namespace
+   * lookup; each item is processed in the background by its contentProcessor.
+   * Returns entry ids and statuses immediately; content is produced later.
+   * Limited to one namespace. Batch size is capped at `DEFAULT_ADD_MANY_BATCH_SIZE`.
+   */
+  async addManyAsync(
+    ctx: CtxWith<"runMutation">,
+    args: (NamespaceSelection & { maxBatchSize?: number }) & {
+      items: Array<
+        EntryArgs<FitlerSchemas, EntryMetadata> & {
+          contentProcessor: ContentProcessorAction;
+          onComplete?: OnComplete;
+        }
+      >;
+    },
+  ): Promise<{
+    entryIds: EntryId[];
+    statuses: ("pending" | "ready")[];
+    created: boolean[];
+  }> {
+    if (args.items.length === 0) {
+      return { entryIds: [], statuses: [], created: [] };
+    }
+    const maxBatchSize =
+      args.maxBatchSize ?? DEFAULT_ADD_MANY_BATCH_SIZE;
+    if (args.items.length > maxBatchSize) {
+      throw new Error(
+        `addManyAsync: items length ${args.items.length} exceeds maxBatchSize ${maxBatchSize}. Split into smaller batches.`,
+      );
+    }
+
+    let namespaceId: NamespaceId;
+    if ("namespaceId" in args) {
+      namespaceId = args.namespaceId;
+    } else {
+      const namespace = await this.getOrCreateNamespace(ctx, {
+        namespace: args.namespace,
+        status: "ready",
+      });
+      namespaceId = namespace.namespaceId;
+    }
+
+    for (const item of args.items) {
+      validateAddFilterValues(item.filterValues, this.options.filterNames);
+    }
+
+    const onCompleteHandles = await Promise.all(
+      args.items.map((item) =>
+        item.onComplete ? createFunctionHandle(item.onComplete) : undefined,
+      ),
+    );
+    const contentProcessorHandles = await Promise.all(
+      args.items.map((item) => createFunctionHandle(item.contentProcessor)),
+    );
+
+    const itemsForMutation = args.items.map((item, i) => ({
+      entry: {
+        key: item.key,
+        title: item.title,
+        metadata: item.metadata,
+        filterValues: item.filterValues ?? [],
+        importance: item.importance ?? 1,
+        contentHash: item.contentHash,
+      },
+      onComplete: onCompleteHandles[i],
+      contentProcessor: contentProcessorHandles[i],
+    }));
+
+    const addManyAsyncRef = this.component.entries as unknown as Record<
+      string,
+      FunctionReference<"mutation", "internal", any, any>
+    >;
+    const rawResult = (await ctx.runMutation(addManyAsyncRef.addManyAsync, {
+      namespaceId: namespaceId as unknown as string,
+      items: itemsForMutation,
+    })) as {
+      entryIds: string[];
+      statuses: ("pending" | "ready")[];
+      created: boolean[];
+    };
+
+    return {
+      entryIds: rawResult.entryIds as EntryId[],
+      statuses: rawResult.statuses,
+      created: rawResult.created,
+    };
   }
 
   /**
@@ -729,6 +993,25 @@ export class StringRAG<
   }
 
   /**
+   * Get multiple entries by id in one query. Reduces round-trips when
+   * loading many entries. Returns null for missing entry ids.
+   */
+  async getEntries(
+    ctx: CtxWith<"runQuery">,
+    args: { entryIds: EntryId[] },
+  ): Promise<(Entry<FitlerSchemas, EntryMetadata> | null)[]> {
+    if (args.entryIds.length === 0) return [];
+    const entriesRef = this.component.entries as unknown as Record<
+      string,
+      FunctionReference<"query", "internal", any, any>
+    >;
+    const result = (await ctx.runQuery(entriesRef.getMany, {
+      entryIds: args.entryIds as unknown as string[],
+    })) as (Entry<FitlerSchemas, EntryMetadata> | null)[];
+    return result;
+  }
+
+  /**
    * Find an existing entry by its content hash, which you can use to copy
    * new results into a new entry when migrating, or avoiding duplicating work
    * when updating content.
@@ -824,6 +1107,44 @@ export class StringRAG<
   async deleteAsync(ctx: CtxWith<"runMutation">, args: { entryId: EntryId }) {
     await ctx.runMutation(this.component.entries.deleteAsync, {
       entryId: args.entryId,
+    });
+  }
+
+  /**
+   * Delete multiple entries and their content in one mutation. Reduces
+   * function calls and database bandwidth compared to calling `deleteAsync`
+   * or `delete` repeatedly.
+   */
+  async deleteMany(
+    ctx: CtxWith<"runMutation">,
+    args: { entryIds: EntryId[] },
+  ): Promise<void> {
+    if (args.entryIds.length === 0) return;
+    const deleteManyRef = this.component.entries as unknown as Record<
+      string,
+      FunctionReference<"mutation", "internal", any, any>
+    >;
+    await ctx.runMutation(deleteManyRef.deleteMany, {
+      entryIds: args.entryIds as unknown as string[],
+    });
+  }
+
+  /**
+   * Schedule deletion of multiple entries in the background. One mutation
+   * enqueues a delete job per entry; actual deletes run asynchronously.
+   * Use when you want to avoid a long-running mutation.
+   */
+  async deleteManyAsync(
+    ctx: CtxWith<"runMutation">,
+    args: { entryIds: EntryId[] },
+  ): Promise<void> {
+    if (args.entryIds.length === 0) return;
+    const deleteManyAsyncRef = this.component.entries as unknown as Record<
+      string,
+      FunctionReference<"mutation", "internal", any, any>
+    >;
+    await ctx.runMutation(deleteManyAsyncRef.deleteManyAsync, {
+      entryIds: args.entryIds as unknown as string[],
     });
   }
 
@@ -996,11 +1317,12 @@ function validateAddFilterValues(
   if (!filterValues) {
     return;
   }
-  if (!filterNames) {
+  if (!filterNames?.length) {
     throw new Error(
       "You must provide filter names to StringRAG to add entries with filters.",
     );
   }
+  const allowed = new Set(filterNames);
   const seen = new Set<string>();
   for (const filterValue of filterValues) {
     if (seen.has(filterValue.name)) {
@@ -1008,12 +1330,18 @@ function validateAddFilterValues(
         `You cannot provide the same filter name twice: ${filterValue.name}.`,
       );
     }
+    if (!allowed.has(filterValue.name)) {
+      throw new Error(
+        `Filter name "${filterValue.name}" is not valid for this namespace. Valid names: ${filterNames.join(", ")}.`,
+      );
+    }
     seen.add(filterValue.name);
   }
+  // Require a value for every filter name (no optional filters)
   for (const filterName of filterNames) {
     if (!seen.has(filterName)) {
       throw new Error(
-        `Filter name ${filterName} is not valid (one of ${filterNames.join(", ")}).`,
+        `Missing required filter value for "${filterName}". Provide values for all namespace filters: ${filterNames.join(", ")}.`,
       );
     }
   }
@@ -1073,6 +1401,8 @@ type EntryArgs<
    * `{ name: "categoryAndPriority", value: ["articles", "high"] }`
    * and searching with the same value will return entries that match that
    * value exactly.
+   * Order of items in this array does not matter. You must provide a value
+   * for every filter name on the namespace. See docs/filters.md.
    */
   filterValues?: EntryFilter<FitlerSchemas>[];
   /**
@@ -1105,6 +1435,7 @@ type SearchOptions<FitlerSchemas extends Record<string, Value>> = {
    * e.g. if you insert a entry with
    * `{ team_user: { team: "team1", user: "user1" } }`, it will not match
    * `{ team_user: { team: "team1" } }` but it will match
+   * Order of items in this array does not matter. See docs/filters.md.
    */
   filters?: EntryFilter<FitlerSchemas>[];
   /**

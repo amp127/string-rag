@@ -256,6 +256,54 @@ describe("embeddings", () => {
     expect(vector1!.filter0).not.toEqual(vector2!.filter0);
   });
 
+  test("filterNames order determines which slot a name maps to", async () => {
+    const t = convexTest(schema, modules);
+    const embedding = Array(128).fill(0.1);
+
+    // Namespace A: "type" is first -> filter0, "category" second -> filter1
+    const namespaceAId = await t.run(async (ctx) => {
+      return ctx.db.insert("namespaces", {
+        namespace: "order-a",
+        version: 1,
+        modelId: "test-model",
+        dimension: 128,
+        filterNames: ["type", "category"],
+        status: { kind: "ready" },
+      });
+    });
+    // Namespace B: same names, different order -> "type" is second -> filter1
+    const namespaceBId = await t.run(async (ctx) => {
+      return ctx.db.insert("namespaces", {
+        namespace: "order-b",
+        version: 1,
+        modelId: "test-model",
+        dimension: 128,
+        filterNames: ["category", "type"],
+        status: { kind: "ready" },
+      });
+    });
+
+    // Same logical filter "type" = "article": in A it goes to index 0, in B to index 1
+    const vectorAId = await t.run(async (ctx) => {
+      return insertEmbedding(ctx, embedding, namespaceAId, undefined, {
+        0: "article",
+      });
+    });
+    const vectorBId = await t.run(async (ctx) => {
+      return insertEmbedding(ctx, embedding, namespaceBId, undefined, {
+        1: "article",
+      });
+    });
+
+    const vectorA = await t.run(async (ctx) => ctx.db.get(vectorAId));
+    const vectorB = await t.run(async (ctx) => ctx.db.get(vectorBId));
+
+    expect(vectorA!.filter0).toEqual([namespaceAId, "article"]);
+    expect(vectorA!.filter1).toBeUndefined();
+    expect(vectorB!.filter0).toBeUndefined();
+    expect(vectorB!.filter1).toEqual([namespaceBId, "article"]);
+  });
+
   test("search without filters returns only vectors in the target namespace", async () => {
     const t = convexTest(schema, modules);
 

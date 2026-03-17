@@ -451,6 +451,32 @@ if (status === "ready" && !created) {
 }
 ```
 
+### Batch operations (addMany, getEntries, deleteMany)
+
+To reduce function call count and database bandwidth, use the batch APIs when
+operating on many entries in the same namespace:
+
+- **`addMany(ctx, { namespace, items, maxBatchSize? })`** — Add multiple entries
+  in one namespace with a single namespace lookup. When using `text`, all texts
+  are embedded in one batch call when the model supports it (`doEmbed({ values })`).
+  Optional `maxBatchSize` (default 100) caps the batch to stay within Convex
+  mutation limits.
+- **`getEntries(ctx, { entryIds })`** — Load multiple entries by id in one query.
+- **`deleteMany(ctx, { entryIds })`** — Delete multiple entries and their
+  content in one mutation.
+
+Async batch variants (return immediately; work runs in the background):
+
+- **`addManyAsync(ctx, { namespace, items, maxBatchSize? })`** — Like `addMany`,
+  but each item has a `contentProcessor` (same as `addAsync`). One namespace
+  lookup; each entry is processed by the workpool. Returns `entryIds` and
+  `statuses` (`"pending"`) immediately.
+- **`deleteManyAsync(ctx, { entryIds })`** — Schedules one background delete per
+  entry (via workpool). Use when you want to avoid a long-running mutation.
+
+All batch operations are limited to a single namespace (e.g. one `namespace` or
+`namespaceId` for the whole batch).
+
 ### Add Entries with filters from a URL
 
 Here's a simple example fetching content from a URL to add.

@@ -88,6 +88,22 @@ export const add = mutation({
   },
 });
 
+const filterValuesValidator = v.optional(
+  v.array(
+    v.union(
+      v.object({ name: v.literal("simpleString"), value: v.string() }),
+      v.object({
+        name: v.literal("arrayOfStrings"),
+        value: v.array(v.string()),
+      }),
+      v.object({
+        name: v.literal("customObject"),
+        value: v.record(v.string(), v.any()),
+      }),
+    ),
+  ),
+);
+
 export const search = action({
   args: {
     embedding: v.array(v.number()),
@@ -99,6 +115,30 @@ export const search = action({
       query: args.embedding,
       namespace: args.namespace,
       limit: args.limit ?? 10,
+    });
+
+    return {
+      results,
+      text,
+      entries,
+      usage,
+    };
+  },
+});
+
+export const searchWithFilters = action({
+  args: {
+    embedding: v.array(v.number()),
+    namespace: v.string(),
+    limit: v.optional(v.number()),
+    filters: filterValuesValidator,
+  },
+  handler: async (ctx, args) => {
+    const { results, entries, text, usage } = await rag.search(ctx, {
+      query: args.embedding,
+      namespace: args.namespace,
+      limit: args.limit ?? 10,
+      filters: args.filters ?? [],
     });
 
     return {
@@ -142,11 +182,102 @@ export const searchSimilar = action({
   },
 });
 
+const addManyItemsValidator = v.array(
+  v.object({
+    key: v.optional(v.string()),
+    text: v.optional(v.string()),
+    content: v.optional(
+      v.object({
+        content: v.object({
+          text: v.string(),
+          metadata: v.optional(v.record(v.string(), v.any())),
+        }),
+        embedding: v.array(v.number()),
+        searchableText: v.optional(v.string()),
+      }),
+    ),
+    namespace: v.optional(v.string()),
+    title: v.optional(v.string()),
+    filterValues: v.optional(
+      v.array(
+        v.union(
+          v.object({ name: v.literal("simpleString"), value: v.string() }),
+          v.object({
+            name: v.literal("arrayOfStrings"),
+            value: v.array(v.string()),
+          }),
+          v.object({
+            name: v.literal("customObject"),
+            value: v.record(v.string(), v.any()),
+          }),
+        ),
+      ),
+    ),
+    importance: v.optional(v.number()),
+    contentHash: v.optional(v.string()),
+  }),
+);
+
+export const addMany = mutation({
+  args: {
+    namespace: v.string(),
+    items: addManyItemsValidator,
+    maxBatchSize: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const defaultFilterValues = [
+      { name: "simpleString" as const, value: "" },
+      { name: "arrayOfStrings" as const, value: [] as string[] },
+      { name: "customObject" as const, value: {} as Record<string, unknown> },
+    ];
+    const items = args.items.map((item) => {
+      const base = {
+        key: item.key,
+        title: item.title,
+        filterValues: item.filterValues ?? defaultFilterValues,
+        importance: item.importance,
+        contentHash: item.contentHash,
+      };
+      if (item.content) {
+        return { ...base, content: item.content };
+      }
+      return { ...base, text: item.text ?? "" };
+    });
+    return rag.addMany(ctx, {
+      namespace: args.namespace,
+      items,
+      maxBatchSize: args.maxBatchSize,
+    });
+  },
+});
+
+export const getEntries = query({
+  args: { entryIds: v.array(v.string()) },
+  handler: async (ctx, args) => {
+    return rag.getEntries(ctx, {
+      entryIds: args.entryIds as EntryId[],
+    });
+  },
+});
+
+export const deleteMany = mutation({
+  args: { entryIds: v.array(v.string()) },
+  handler: async (ctx, args) => {
+    return rag.deleteMany(ctx, {
+      entryIds: args.entryIds as EntryId[],
+    });
+  },
+});
+
 const testApi: ApiFromModules<{
   fns: {
     findEntryByContentHash: typeof findEntryByContentHash;
     add: typeof add;
+    addMany: typeof addMany;
+    getEntries: typeof getEntries;
+    deleteMany: typeof deleteMany;
     search: typeof search;
+    searchWithFilters: typeof searchWithFilters;
     searchWithEntryId: typeof searchWithEntryId;
     searchSimilar: typeof searchSimilar;
   };
@@ -434,6 +565,107 @@ Content 3`,
     });
   });
 
+  describe("filters", () => {
+    test("filterValues array order does not matter when adding", async () => {
+      const t = initConvexTest(schema);
+      const ns = "filter-order-ns";
+
+      await t.mutation(testApi.add, {
+        key: "order-a",
+        namespace: ns,
+        text: "Entry with filters A then B",
+        content: {
+          content: { text: "Entry with filters A then B" },
+          embedding: dummyEmbeddings("order-a"),
+          searchableText: "Entry with filters A then B",
+        },
+        filterValues: [
+          { name: "simpleString", value: "tag-a" },
+          { name: "arrayOfStrings", value: ["tag-b"] },
+          { name: "customObject", value: {} },
+        ],
+      });
+      await t.mutation(testApi.add, {
+        key: "order-b",
+        namespace: ns,
+        text: "Entry with filters B then A",
+        content: {
+          content: { text: "Entry with filters B then A" },
+          embedding: dummyEmbeddings("order-b"),
+          searchableText: "Entry with filters B then A",
+        },
+        filterValues: [
+          { name: "arrayOfStrings", value: ["tag-b"] },
+          { name: "customObject", value: {} },
+          { name: "simpleString", value: "tag-a" },
+        ],
+      });
+
+      const bySimple = await t.action(testApi.searchWithFilters, {
+        embedding: dummyEmbeddings("tag"),
+        namespace: ns,
+        filters: [{ name: "simpleString", value: "tag-a" }],
+        limit: 10,
+      });
+      const byArray = await t.action(testApi.searchWithFilters, {
+        embedding: dummyEmbeddings("tag"),
+        namespace: ns,
+        filters: [{ name: "arrayOfStrings", value: ["tag-b"] }],
+        limit: 10,
+      });
+
+      expect(bySimple.entries).toHaveLength(2);
+      expect(byArray.entries).toHaveLength(2);
+      const keys = new Set(bySimple.entries.map((e) => e.key));
+      expect(keys).toContain("order-a");
+      expect(keys).toContain("order-b");
+    });
+
+    test("search filters array order does not matter", async () => {
+      const t = initConvexTest(schema);
+      const ns = "search-filter-order-ns";
+
+      await t.mutation(testApi.add, {
+        key: "both-filters",
+        namespace: ns,
+        text: "Has both filters",
+        content: {
+          content: { text: "Has both filters" },
+          embedding: dummyEmbeddings("both"),
+          searchableText: "Has both filters",
+        },
+        filterValues: [
+          { name: "simpleString", value: "search-a" },
+          { name: "arrayOfStrings", value: ["search-b"] },
+          { name: "customObject", value: {} },
+        ],
+      });
+
+      const order1 = await t.action(testApi.searchWithFilters, {
+        embedding: dummyEmbeddings("both"),
+        namespace: ns,
+        filters: [
+          { name: "simpleString", value: "search-a" },
+          { name: "arrayOfStrings", value: ["search-b"] },
+        ],
+        limit: 10,
+      });
+      const order2 = await t.action(testApi.searchWithFilters, {
+        embedding: dummyEmbeddings("both"),
+        namespace: ns,
+        filters: [
+          { name: "arrayOfStrings", value: ["search-b"] },
+          { name: "simpleString", value: "search-a" },
+        ],
+        limit: 10,
+      });
+
+      expect(order1.entries).toHaveLength(1);
+      expect(order2.entries).toHaveLength(1);
+      expect(order1.entries[0].entryId).toBe(order2.entries[0].entryId);
+    });
+  });
+
   describe("searchWithEntryId", () => {
     test("returns entries similar to the given entry and excludes source", async () => {
       const t = initConvexTest(schema);
@@ -591,6 +823,160 @@ Content 3`,
       expect(Array.isArray(out.entries)).toBe(true);
       expect(typeof out.text).toBe("string");
       expect(out).not.toHaveProperty("usage");
+    });
+  });
+
+  describe("addMany, getEntries, deleteMany", () => {
+    test("addMany adds multiple entries in one namespace", async () => {
+      const t = initConvexTest(schema);
+      const result = await t.mutation(testApi.addMany, {
+        namespace: "batch-ns",
+        items: [
+          {
+            key: "batch-a",
+            title: "Doc A",
+            content: {
+              content: { text: "First batch doc" },
+              embedding: dummyEmbeddings("First batch doc"),
+              searchableText: "First batch doc",
+            },
+          },
+          {
+            key: "batch-b",
+            title: "Doc B",
+            content: {
+              content: { text: "Second batch doc" },
+              embedding: dummyEmbeddings("Second batch doc"),
+              searchableText: "Second batch doc",
+            },
+          },
+          {
+            key: "batch-c",
+            title: "Doc C",
+            content: {
+              content: { text: "Third batch doc" },
+              embedding: dummyEmbeddings("Third batch doc"),
+              searchableText: "Third batch doc",
+            },
+          },
+        ],
+      });
+      expect(result.entryIds).toHaveLength(3);
+      expect(result.statuses).toEqual(["ready", "ready", "ready"]);
+      expect(result.created).toEqual([true, true, true]);
+      await t.run(async (ctx) => {
+        const ns = await rag.getNamespace(ctx, { namespace: "batch-ns" });
+        expect(ns).not.toBeNull();
+        const { page } = await rag.list(ctx, {
+          namespaceId: ns!.namespaceId,
+          limit: 10,
+        });
+        expect(page.length).toBe(3);
+        const entries = await rag.getEntries(ctx, {
+          entryIds: result.entryIds,
+        });
+        expect(entries).toHaveLength(3);
+        expect(entries.every((e) => e !== null)).toBe(true);
+      });
+    });
+
+    test("addMany with pre-computed content (no embed call)", async () => {
+      const t = initConvexTest(schema);
+      const result = await t.mutation(testApi.addMany, {
+        namespace: "batch-content-ns",
+        items: [
+          {
+            key: "pre-a",
+            content: {
+              content: { text: "Precomputed A" },
+              embedding: dummyEmbeddings("Precomputed A"),
+              searchableText: "Precomputed A",
+            },
+          },
+          {
+            key: "pre-b",
+            content: {
+              content: { text: "Precomputed B" },
+              embedding: dummyEmbeddings("Precomputed B"),
+              searchableText: "Precomputed B",
+            },
+          },
+        ],
+      });
+      expect(result.entryIds).toHaveLength(2);
+      expect(result.statuses).toEqual(["ready", "ready"]);
+      expect(result.usage.tokens).toBe(0);
+    });
+
+    test("getEntries returns multiple entries and null for missing", async () => {
+      const t = initConvexTest(schema);
+      const { entryId: id1 } = await addWithDummyContent(t, {
+        key: "getMany-one",
+        text: "Only one",
+        namespace: "getMany-ns",
+      });
+      const { entryId: id2 } = await addWithDummyContent(t, {
+        key: "getMany-two",
+        text: "Second",
+        namespace: "getMany-ns",
+      });
+      await t.run(async (ctx) => {
+        const entries = await rag.getEntries(ctx, {
+          entryIds: [id1, id2],
+        });
+        expect(entries).toHaveLength(2);
+        expect(entries[0]).not.toBeNull();
+        expect(entries[1]).not.toBeNull();
+        const withMissing = await rag.getEntries(ctx, {
+          entryIds: [id1, id2, id1],
+        });
+        expect(withMissing).toHaveLength(3);
+        expect(withMissing[0]).not.toBeNull();
+        expect(withMissing[1]).not.toBeNull();
+        expect(withMissing[2]).not.toBeNull();
+      });
+    });
+
+    test("deleteMany removes multiple entries in one mutation", async () => {
+      const t = initConvexTest(schema);
+      const result = await t.mutation(testApi.addMany, {
+        namespace: "delete-many-ns",
+        items: [
+          {
+            key: "del-1",
+            content: {
+              content: { text: "To delete 1" },
+              embedding: dummyEmbeddings("To delete 1"),
+              searchableText: "To delete 1",
+            },
+          },
+          {
+            key: "del-2",
+            content: {
+              content: { text: "To delete 2" },
+              embedding: dummyEmbeddings("To delete 2"),
+              searchableText: "To delete 2",
+            },
+          },
+          {
+            key: "del-3",
+            content: {
+              content: { text: "To delete 3" },
+              embedding: dummyEmbeddings("To delete 3"),
+              searchableText: "To delete 3",
+            },
+          },
+        ],
+      });
+      await t.run(async (ctx) => {
+        await rag.deleteMany(ctx, { entryIds: result.entryIds });
+      });
+      await t.run(async (ctx) => {
+        const entries = await rag.getEntries(ctx, {
+          entryIds: result.entryIds,
+        });
+        expect(entries.every((e) => e === null)).toBe(true);
+      });
     });
   });
 });

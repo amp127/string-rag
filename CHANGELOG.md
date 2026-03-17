@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.5
+
+- **Batch client APIs** (single namespace per call): `addMany` (one namespace
+  lookup; batched embedding when the model supports `doEmbed({ values })`),
+  `getEntries` (one query), `deleteMany` (one mutation).
+- **Async batch APIs:** `addManyAsync` (content processor per item, workpool),
+  `deleteManyAsync` (schedules background deletes).
+- **Component:** `entries.addMany`, `getMany`, `addManyAsync`, `deleteMany`,
+  `deleteManyAsync`; shared `addAsyncOneEntryHandler` for `addAsync` /
+  `addManyAsync`; `content.replaceContentHandler` reused for batch add promotion.
+- Exported `DEFAULT_ADD_MANY_BATCH_SIZE` (default 100) for batch size limits.
+- README: batch and async batch documentation.
+- Test-only helpers: `testContentProcessor`, `getTestContentProcessorHandle`
+  (component); client tests register workpool for async flows.
+- TypeScript: explicit handler return types to fix circular inference on
+  `addAsync`, `getTestContentProcessorHandle`, and `testContentProcessor`.
+
 ## 0.1.4
 
 - Added `searchSimilar(ctx, { namespace, key, ... })` to find similar entries

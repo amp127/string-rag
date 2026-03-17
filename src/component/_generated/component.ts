@@ -93,6 +93,60 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         { created: boolean; entryId: string; status: "pending" | "ready" },
         Name
       >;
+      addMany: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          items: Array<{
+            content?: {
+              content: { metadata?: Record<string, any>; text: string };
+              embedding: Array<number>;
+              searchableText?: string;
+            };
+            entry: {
+              contentHash?: string;
+              filterValues: Array<{ name: string; value: any }>;
+              importance: number;
+              key?: string;
+              metadata?: Record<string, any>;
+              title?: string;
+            };
+            onComplete?: string;
+          }>;
+          namespaceId: string;
+        },
+        {
+          created: Array<boolean>;
+          entryIds: Array<string>;
+          statuses: Array<"pending" | "ready" | "replaced">;
+        },
+        Name
+      >;
+      addManyAsync: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          items: Array<{
+            contentProcessor: string;
+            entry: {
+              contentHash?: string;
+              filterValues: Array<{ name: string; value: any }>;
+              importance: number;
+              key?: string;
+              metadata?: Record<string, any>;
+              title?: string;
+            };
+            onComplete?: string;
+          }>;
+          namespaceId: string;
+        },
+        {
+          created: Array<boolean>;
+          entryIds: Array<string>;
+          statuses: Array<"pending" | "ready">;
+        },
+        Name
+      >;
       deleteAsync: FunctionReference<
         "mutation",
         "internal",
@@ -111,6 +165,20 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "action",
         "internal",
         { key: string; namespaceId: string },
+        null,
+        Name
+      >;
+      deleteMany: FunctionReference<
+        "mutation",
+        "internal",
+        { entryIds: Array<string> },
+        null,
+        Name
+      >;
+      deleteManyAsync: FunctionReference<
+        "mutation",
+        "internal",
+        { entryIds: Array<string> },
         null,
         Name
       >;
@@ -160,6 +228,23 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           status: "pending" | "ready" | "replaced";
           title?: string;
         } | null,
+        Name
+      >;
+      getMany: FunctionReference<
+        "query",
+        "internal",
+        { entryIds: Array<string> },
+        Array<{
+          contentHash?: string;
+          entryId: string;
+          filterValues: Array<{ name: string; value: any }>;
+          importance: number;
+          key?: string;
+          metadata?: Record<string, any>;
+          replacedAt?: number;
+          status: "pending" | "ready" | "replaced";
+          title?: string;
+        } | null>,
         Name
       >;
       list: FunctionReference<

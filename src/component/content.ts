@@ -123,73 +123,84 @@ async function ensureLatestEntryVersion(ctx: QueryCtx, entry: Doc<"entries">) {
   return true;
 }
 
+export async function replaceContentHandler(
+  ctx: MutationCtx,
+  entryId: Id<"entries">,
+): Promise<"ready" | "replaced"> {
+  const entry = await ctx.db.get(entryId);
+  if (!entry) {
+    throw new Error(`Entry ${entryId} not found`);
+  }
+  const isLatest = await ensureLatestEntryVersion(ctx, entry);
+  if (!isLatest) {
+    return "replaced";
+  }
+
+  const namespace = await ctx.db.get(entry.namespaceId);
+  assert(namespace, `Namespace ${entry.namespaceId} not found`);
+
+  const previousEntry = await getPreviousEntry(ctx, entry);
+  const numberedFilter = numberedFilterFromNamedFilters(
+    entry.filterValues,
+    namespace.filterNames,
+  );
+
+  const contentDoc = await ctx.db
+    .query("content")
+    .withIndex("entryId", (q) => q.eq("entryId", entryId))
+    .first();
+
+  if (!contentDoc) {
+    return "ready";
+  }
+
+  if (contentDoc.state.kind === "pending") {
+    const embeddingId = await insertEmbedding(
+      ctx,
+      contentDoc.state.embedding,
+      entry.namespaceId,
+      entry.importance,
+      numberedFilter,
+    );
+    await ctx.db.patch(contentDoc._id, {
+      state: {
+        kind: "ready",
+        embeddingId,
+        searchableText: contentDoc.state.pendingSearchableText,
+      },
+    });
+  }
+
+  if (previousEntry) {
+    const previousContent = await ctx.db
+      .query("content")
+      .withIndex("entryId", (q) => q.eq("entryId", previousEntry._id))
+      .first();
+    if (previousContent?.state.kind === "ready") {
+      const vector = await ctx.db.get(previousContent.state.embeddingId);
+      if (vector) {
+        await ctx.db.delete(previousContent.state.embeddingId);
+        await ctx.db.patch(previousContent._id, {
+          state: {
+            kind: "replaced",
+            embeddingId: previousContent.state.embeddingId,
+            vector: vector.vector,
+            pendingSearchableText: previousContent.state.searchableText,
+          },
+        });
+      }
+    }
+  }
+
+  return "ready";
+}
+
 export const replaceContent = mutation({
   args: v.object({ entryId: v.id("entries") }),
   returns: v.object({ status: vStatus }),
   handler: async (ctx, args) => {
-    const { entryId } = args;
-    const entry = await ctx.db.get(entryId);
-    if (!entry) {
-      throw new Error(`Entry ${entryId} not found`);
-    }
-    const isLatest = await ensureLatestEntryVersion(ctx, entry);
-    if (!isLatest) {
-      return { status: "replaced" as const };
-    }
-
-    const namespace = await ctx.db.get(entry.namespaceId);
-    assert(namespace, `Namespace ${entry.namespaceId} not found`);
-
-    const previousEntry = await getPreviousEntry(ctx, entry);
-    const numberedFilter = numberedFilterFromNamedFilters(
-      entry.filterValues,
-      namespace.filterNames,
-    );
-
-    const contentDoc = await ctx.db
-      .query("content")
-      .withIndex("entryId", (q) => q.eq("entryId", entryId))
-      .first();
-
-    if (!contentDoc) {
-      return { status: "ready" as const };
-    }
-
-    if (contentDoc.state.kind === "pending") {
-      const embeddingId = await insertEmbedding(
-        ctx,
-        contentDoc.state.embedding,
-        entry.namespaceId,
-        entry.importance,
-        numberedFilter,
-      );
-      await ctx.db.patch(contentDoc._id, {
-        state: { kind: "ready", embeddingId, searchableText: contentDoc.state.pendingSearchableText },
-      });
-    }
-
-    if (previousEntry) {
-      const previousContent = await ctx.db
-        .query("content")
-        .withIndex("entryId", (q) => q.eq("entryId", previousEntry._id))
-        .first();
-      if (previousContent?.state.kind === "ready") {
-        const vector = await ctx.db.get(previousContent.state.embeddingId);
-        if (vector) {
-          await ctx.db.delete(previousContent.state.embeddingId);
-          await ctx.db.patch(previousContent._id, {
-            state: {
-              kind: "replaced",
-              embeddingId: previousContent.state.embeddingId,
-              vector: vector.vector,
-              pendingSearchableText: previousContent.state.searchableText,
-            },
-          });
-        }
-      }
-    }
-
-    return { status: "ready" as const };
+    const status = await replaceContentHandler(ctx, args.entryId);
+    return { status };
   },
 });
 

@@ -729,4 +729,188 @@ describe("entries", () => {
     expect(remainingEntries[0].version).toBe(2);
     expect(remainingEntries[0]._id).toBe(result3.entryId);
   });
+
+  test("addMany creates multiple entries in one mutation", async () => {
+    const t = initConvexTest();
+    const namespaceId = await setupTestNamespace(t);
+    const content = testContentArgs("batch content");
+
+    function entryWithoutNamespace(
+      namespaceId: Id<"namespaces">,
+      key: string,
+    ) {
+      const { namespaceId: _n, ...rest } = testEntryArgs(namespaceId, key);
+      return rest;
+    }
+
+    const result = await t.mutation(api.entries.addMany, {
+      namespaceId,
+      items: [
+        {
+          entry: entryWithoutNamespace(namespaceId, "batch-1"),
+          content,
+        },
+        {
+          entry: entryWithoutNamespace(namespaceId, "batch-2"),
+          content: testContentArgs("second"),
+        },
+        {
+          entry: entryWithoutNamespace(namespaceId, "batch-3"),
+          content: testContentArgs("third"),
+        },
+      ],
+    });
+
+    expect(result.entryIds).toHaveLength(3);
+    expect(result.statuses).toEqual(["ready", "ready", "ready"]);
+    expect(result.created).toEqual([true, true, true]);
+
+    const entries = await t.run(async (ctx) => {
+      return Promise.all(
+        result.entryIds.map((id) => ctx.db.get(id)),
+      );
+    });
+    expect(entries.every((e) => e !== null)).toBe(true);
+    expect(entries.map((e) => e!.key)).toEqual(["batch-1", "batch-2", "batch-3"]);
+  });
+
+  test("getMany returns entries and null for missing ids", async () => {
+    const t = initConvexTest();
+    const namespaceId = await setupTestNamespace(t);
+    const { entryId: id1 } = await t.mutation(api.entries.add, {
+      entry: testEntryArgs(namespaceId, "g1"),
+      content: testContentArgs(),
+    });
+    const { entryId: id2 } = await t.mutation(api.entries.add, {
+      entry: testEntryArgs(namespaceId, "g2"),
+      content: testContentArgs(),
+    });
+
+    const results = await t.run(async (ctx) => {
+      return ctx.runQuery(api.entries.getMany, {
+        entryIds: [id1, id2, id1],
+      });
+    });
+
+    expect(results).toHaveLength(3);
+    expect(results[0]).not.toBeNull();
+    expect(results[1]).not.toBeNull();
+    expect(results[2]).not.toBeNull();
+    expect(results[0]!.entryId).toBe(id1);
+    expect(results[1]!.entryId).toBe(id2);
+  });
+
+  test("deleteMany removes multiple entries in one mutation", async () => {
+    const t = initConvexTest();
+    const namespaceId = await setupTestNamespace(t);
+    function entryWithoutNamespace(
+      namespaceId: Id<"namespaces">,
+      key: string,
+    ) {
+      const { namespaceId: _n, ...rest } = testEntryArgs(namespaceId, key);
+      return rest;
+    }
+    const result = await t.mutation(api.entries.addMany, {
+      namespaceId,
+      items: [
+        {
+          entry: entryWithoutNamespace(namespaceId, "d1"),
+          content: testContentArgs(),
+        },
+        {
+          entry: entryWithoutNamespace(namespaceId, "d2"),
+          content: testContentArgs(),
+        },
+      ],
+    });
+
+    await t.mutation(api.entries.deleteMany, { entryIds: result.entryIds });
+
+    const entries = await t.run(async (ctx) => {
+      return Promise.all(
+        result.entryIds.map((id) => ctx.db.get(id)),
+      );
+    });
+    expect(entries.every((e) => e === null)).toBe(true);
+  });
+
+  test("addManyAsync creates pending entries and processes them via workpool", async () => {
+    const t = initConvexTest();
+    const namespaceId = await setupTestNamespace(t);
+    const contentProcessorHandle = await t.mutation(
+      internal.entries.getTestContentProcessorHandle,
+      {},
+    );
+    function entryWithoutNamespace(
+      namespaceId: Id<"namespaces">,
+      key: string,
+    ) {
+      const { namespaceId: _n, ...rest } = testEntryArgs(namespaceId, key);
+      return rest;
+    }
+
+    const result = await t.mutation(api.entries.addManyAsync, {
+      namespaceId,
+      items: [
+        {
+          entry: entryWithoutNamespace(namespaceId, "async-1"),
+          contentProcessor: contentProcessorHandle,
+        },
+        {
+          entry: entryWithoutNamespace(namespaceId, "async-2"),
+          contentProcessor: contentProcessorHandle,
+        },
+      ],
+    });
+
+    expect(result.entryIds).toHaveLength(2);
+    expect(result.statuses).toEqual(["pending", "pending"]);
+    expect(result.created).toEqual([true, true]);
+
+    const entries = await t.run(async (ctx) => {
+      return Promise.all(
+        result.entryIds.map((id) => ctx.db.get(id)),
+      );
+    });
+    expect(entries.every((e) => e !== null)).toBe(true);
+    expect(entries.every((e) => e!.status.kind === "pending")).toBe(true);
+  });
+
+  test("deleteManyAsync schedules deletes and entries are removed after run", async () => {
+    const t = initConvexTest();
+    const namespaceId = await setupTestNamespace(t);
+    function entryWithoutNamespace(
+      namespaceId: Id<"namespaces">,
+      key: string,
+    ) {
+      const { namespaceId: _n, ...rest } = testEntryArgs(namespaceId, key);
+      return rest;
+    }
+    const result = await t.mutation(api.entries.addMany, {
+      namespaceId,
+      items: [
+        {
+          entry: entryWithoutNamespace(namespaceId, "async-del-1"),
+          content: testContentArgs(),
+        },
+        {
+          entry: entryWithoutNamespace(namespaceId, "async-del-2"),
+          content: testContentArgs(),
+        },
+      ],
+    });
+
+    await t.mutation(api.entries.deleteManyAsync, {
+      entryIds: result.entryIds,
+    });
+
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+
+    const entries = await t.run(async (ctx) => {
+      return Promise.all(
+        result.entryIds.map((id) => ctx.db.get(id)),
+      );
+    });
+    expect(entries.every((e) => e === null)).toBe(true);
+  });
 });

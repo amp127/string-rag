@@ -4,12 +4,13 @@ import {
   paginationOptsValidator,
   PaginationResult,
 } from "convex/server";
-import { v, type Value } from "convex/values";
+import { v, type Infer, type Value } from "convex/values";
 import type { ContentProcessorAction, EntryFilter, EntryId } from "../shared.js";
 import {
   statuses,
   vActiveStatus,
   vCreateContentArgs,
+  vContentProcessorArgs,
   vEntry,
   vPaginationResult,
   vStatus,
@@ -19,14 +20,20 @@ import { api, internal } from "./_generated/api.js";
 import type { Doc, Id } from "./_generated/dataModel.js";
 import {
   action,
+  internalAction,
   internalMutation,
   internalQuery,
   mutation,
   query,
+  type ActionCtx,
   type MutationCtx,
   type QueryCtx,
 } from "./_generated/server.js";
-import { deleteContentHandler, insertContent } from "./content.js";
+import {
+  deleteContentHandler,
+  insertContent,
+  replaceContentHandler,
+} from "./content.js";
 import schema, { type StatusWithOnComplete } from "./schema.js";
 import { mergedStream } from "convex-helpers/server/stream";
 import { stream } from "convex-helpers/server/stream";
@@ -54,6 +61,74 @@ const workpool = new Workpool(components.workpool, {
   maxParallelism: 10,
 });
 
+/** Internal: add a single entry asynchronously via content processor. Used by addAsync and addManyAsync. */
+async function addAsyncOneEntryHandler(
+  ctx: MutationCtx,
+  args: {
+    entry: {
+      namespaceId: Id<"namespaces">;
+      key?: string;
+      title?: string;
+      metadata?: Record<string, Value>;
+      importance: number;
+      filterValues: EntryFilter[];
+      contentHash?: string;
+    };
+    onComplete?: string;
+    contentProcessor: string;
+    insertContentHandle: string;
+  },
+): Promise<{
+  entryId: Id<"entries">;
+  status: "pending" | "ready";
+  created: boolean;
+}> {
+  const { namespaceId, key } = args.entry;
+  const namespace = await ctx.db.get(namespaceId);
+  assert(namespace, `Namespace ${namespaceId} not found`);
+  const existing = await findExistingEntry(ctx, namespaceId, key);
+  if (
+    existing?.status.kind === "ready" &&
+    entryIsSame(existing, args.entry)
+  ) {
+    return {
+      entryId: existing._id,
+      status: existing.status.kind,
+      created: false,
+    };
+  }
+  const version = existing ? existing.version + 1 : 0;
+  const status: StatusWithOnComplete = {
+    kind: "pending",
+    onComplete: args.onComplete,
+  };
+  const entryId = await ctx.db.insert("entries", {
+    ...args.entry,
+    version,
+    status,
+  });
+  const contentProcessorAction = args.contentProcessor as unknown as ContentProcessorAction;
+  await workpool.enqueueAction(
+    ctx,
+    contentProcessorAction,
+    {
+      namespace: publicNamespace(namespace),
+      entry: publicEntry({
+        ...args.entry,
+        _id: entryId,
+        status: status,
+      }),
+      insertContent: args.insertContentHandle,
+    },
+    {
+      name: workpoolName(namespace.namespace, args.entry.key, entryId),
+      onComplete: internal.entries.addAsyncOnComplete,
+      context: entryId,
+    },
+  );
+  return { entryId, status: status.kind, created: true };
+}
+
 export const addAsync = mutation({
   args: {
     entry: v.object({
@@ -67,52 +142,18 @@ export const addAsync = mutation({
     status: vActiveStatus,
     created: v.boolean(),
   }),
-  handler: async (ctx, args) => {
-    const { namespaceId, key } = args.entry;
-    const namespace = await ctx.db.get(namespaceId);
-    assert(namespace, `Namespace ${namespaceId} not found`);
-    // iterate through the latest versions of the entry
-    const existing = await findExistingEntry(ctx, namespaceId, key);
-    if (
-      existing?.status.kind === "ready" &&
-      entryIsSame(existing, args.entry)
-    ) {
-      return {
-        entryId: existing._id,
-        status: existing.status.kind,
-        created: false,
-      };
-    }
-    const version = existing ? existing.version + 1 : 0;
-    const status: StatusWithOnComplete = {
-      kind: "pending",
-      onComplete: args.onComplete,
-    };
-    const entryId = await ctx.db.insert("entries", {
-      ...args.entry,
-      version,
-      status,
-    });
-    const contentProcessorAction = args.contentProcessor as unknown as ContentProcessorAction;
-    await workpool.enqueueAction(
-      ctx,
-      contentProcessorAction,
-      {
-        namespace: publicNamespace(namespace),
-        entry: publicEntry({
-          ...args.entry,
-          _id: entryId,
-          status: status,
-        }),
-        insertContent: await createFunctionHandle(api.content.insert),
-      },
-      {
-        name: workpoolName(namespace.namespace, args.entry.key, entryId),
-        onComplete: internal.entries.addAsyncOnComplete,
-        context: entryId,
-      },
+  handler: async (ctx, args): Promise<{
+    entryId: Id<"entries">;
+    status: "pending" | "ready";
+    created: boolean;
+  }> => {
+    const insertContentHandle: string = await createFunctionHandle(
+      api.content.insert,
     );
-    return { entryId, status: status.kind, created: true };
+    return addAsyncOneEntryHandler(ctx, {
+      ...args,
+      insertContentHandle,
+    });
   },
 });
 
@@ -123,6 +164,47 @@ function workpoolName(
 ) {
   return `rag-async-${namespace}-${key ? key + "-" + entryId : entryId}`;
 }
+
+/**
+ * Test-only: returns a function handle for testContentProcessor so tests can
+ * pass it to addManyAsync (which expects a string handle).
+ */
+export const getTestContentProcessorHandle = internalMutation({
+  args: {},
+  returns: v.string(),
+  handler: async (_ctx): Promise<string> => {
+    const handle: string = await createFunctionHandle(
+      internal.entries.testContentProcessor,
+    );
+    return handle;
+  },
+});
+
+/**
+ * Test-only: minimal content processor for addManyAsync tests. Inserts dummy
+ * content (128-dim embedding, text "test"). Use internal.entries.testContentProcessor.
+ */
+export const testContentProcessor = internalAction({
+  args: vContentProcessorArgs,
+  returns: v.null(),
+  handler: async (ctx, args): Promise<null> => {
+    const content = {
+      content: { text: "test" },
+      embedding: Array.from({ length: 128 }, () => 0.1),
+      searchableText: "test",
+    };
+    await ctx.runMutation(
+      args.insertContent as unknown as Parameters<
+        ActionCtx["runMutation"]
+      >[0],
+      {
+        entryId: args.entry.entryId,
+        content,
+      },
+    );
+    return null;
+  },
+});
 
 export const addAsyncOnComplete = internalMutation({
   args: {
@@ -190,11 +272,177 @@ async function findExistingEntry(
   return existing;
 }
 
+const vEntryWithoutVersionStatus = v.object({
+  ...omit(schema.tables.entries.validator.fields, [
+    "version",
+    "status",
+  ] as const),
+});
+
+/** Internal: add a single entry with optional content. Used by add and addMany. */
+async function addOneEntryHandler(
+  ctx: MutationCtx,
+  args: {
+    entry: {
+      namespaceId: Id<"namespaces">;
+      key?: string;
+      title?: string;
+      metadata?: Record<string, Value>;
+      importance: number;
+      filterValues: EntryFilter[];
+      contentHash?: string;
+    };
+    onComplete?: string;
+    content?: Infer<typeof vCreateContentArgs>;
+  },
+): Promise<{
+  entryId: Id<"entries">;
+  status: "pending" | "ready" | "replaced";
+  created: boolean;
+}> {
+  const { namespaceId, key } = args.entry;
+  const namespace = await ctx.db.get(namespaceId);
+  assert(namespace, `Namespace ${namespaceId} not found`);
+  const existing = await findExistingEntry(ctx, namespaceId, key);
+  if (
+    existing?.status.kind === "ready" &&
+    entryIsSame(existing, args.entry)
+  ) {
+    return {
+      entryId: existing._id,
+      status: existing.status.kind,
+      created: false,
+    };
+  }
+  const version = existing ? existing.version + 1 : 0;
+  const entryId = await ctx.db.insert("entries", {
+    ...args.entry,
+    version,
+    status: { kind: "pending", onComplete: args.onComplete },
+  });
+  if (args.content) {
+    const { status } = await insertContent(ctx, {
+      entryId,
+      content: args.content,
+    });
+    if (status === "ready") {
+      await promoteToReadyHandler(ctx, { entryId });
+    }
+    return {
+      entryId,
+      status,
+      created: true,
+    };
+  }
+  return {
+    entryId,
+    status: "pending" as const,
+    created: true,
+  };
+}
+
+const vAddManyItemEntry = v.object({
+  ...omit(schema.tables.entries.validator.fields, [
+    "namespaceId",
+    "version",
+    "status",
+  ] as const),
+});
+
+export const addMany = mutation({
+  args: {
+    namespaceId: v.id("namespaces"),
+    items: v.array(
+      v.object({
+        entry: vAddManyItemEntry,
+        onComplete: v.optional(v.string()),
+        content: v.optional(vCreateContentArgs),
+      }),
+    ),
+  },
+  returns: v.object({
+    entryIds: v.array(v.id("entries")),
+    statuses: v.array(vStatus),
+    created: v.array(v.boolean()),
+  }),
+  handler: async (ctx, args) => {
+    const namespace = await ctx.db.get(args.namespaceId);
+    assert(
+      namespace,
+      `Namespace ${args.namespaceId} not found for addMany`,
+    );
+    const entryIds: Id<"entries">[] = [];
+    const statuses: ("pending" | "ready" | "replaced")[] = [];
+    const created: boolean[] = [];
+    for (const item of args.items) {
+      const result = await addOneEntryHandler(ctx, {
+        entry: { ...item.entry, namespaceId: args.namespaceId },
+        onComplete: item.onComplete,
+        content: item.content,
+      });
+      entryIds.push(result.entryId);
+      statuses.push(result.status);
+      created.push(result.created);
+    }
+    // Promote any pending entries (had content but previous entry existed).
+    for (let i = 0; i < statuses.length; i++) {
+      if (statuses[i] !== "pending") continue;
+      const replaceStatus = await replaceContentHandler(ctx, entryIds[i]);
+      if (replaceStatus === "replaced") {
+        statuses[i] = "replaced";
+        continue;
+      }
+      await promoteToReadyHandler(ctx, { entryId: entryIds[i] });
+      statuses[i] = "ready";
+    }
+    return { entryIds, statuses, created };
+  },
+});
+
+export const addManyAsync = mutation({
+  args: {
+    namespaceId: v.id("namespaces"),
+    items: v.array(
+      v.object({
+        entry: vAddManyItemEntry,
+        onComplete: v.optional(v.string()),
+        contentProcessor: v.string(),
+      }),
+    ),
+  },
+  returns: v.object({
+    entryIds: v.array(v.id("entries")),
+    statuses: v.array(vActiveStatus),
+    created: v.array(v.boolean()),
+  }),
+  handler: async (ctx, args) => {
+    const namespace = await ctx.db.get(args.namespaceId);
+    assert(
+      namespace,
+      `Namespace ${args.namespaceId} not found for addManyAsync`,
+    );
+    const insertContentHandle = await createFunctionHandle(api.content.insert);
+    const entryIds: Id<"entries">[] = [];
+    const statuses: ("pending" | "ready")[] = [];
+    const created: boolean[] = [];
+    for (const item of args.items) {
+      const result = await addAsyncOneEntryHandler(ctx, {
+        entry: { ...item.entry, namespaceId: args.namespaceId },
+        onComplete: item.onComplete,
+        contentProcessor: item.contentProcessor,
+        insertContentHandle,
+      });
+      entryIds.push(result.entryId);
+      statuses.push(result.status);
+      created.push(result.created);
+    }
+    return { entryIds, statuses, created };
+  },
+});
+
 export const add = mutation({
   args: {
-    entry: v.object({
-      ...omit(schema.tables.entries.validator.fields, ["version", "status"]),
-    }),
+    entry: vEntryWithoutVersionStatus,
     onComplete: v.optional(v.string()),
     content: v.optional(vCreateContentArgs),
   },
@@ -204,46 +452,7 @@ export const add = mutation({
     created: v.boolean(),
   }),
   handler: async (ctx, args) => {
-    const { namespaceId, key } = args.entry;
-    const namespace = await ctx.db.get(namespaceId);
-    assert(namespace, `Namespace ${namespaceId} not found`);
-    // iterate through the latest versions of the entry
-    const existing = await findExistingEntry(ctx, namespaceId, key);
-    if (
-      existing?.status.kind === "ready" &&
-      entryIsSame(existing, args.entry)
-    ) {
-      return {
-        entryId: existing._id,
-        status: existing.status.kind,
-        created: false,
-      };
-    }
-    const version = existing ? existing.version + 1 : 0;
-    const entryId = await ctx.db.insert("entries", {
-      ...args.entry,
-      version,
-      status: { kind: "pending", onComplete: args.onComplete },
-    });
-    if (args.content) {
-      const { status } = await insertContent(ctx, {
-        entryId,
-        content: args.content,
-      });
-      if (status === "ready") {
-        await promoteToReadyHandler(ctx, { entryId });
-      }
-      return {
-        entryId,
-        status,
-        created: true,
-      };
-    }
-    return {
-      entryId,
-      status: "pending" as const,
-      created: true,
-    };
+    return addOneEntryHandler(ctx, args);
   },
 });
 
@@ -329,6 +538,24 @@ export const get = query({
       return null;
     }
     return publicEntry(entry);
+  },
+});
+
+/**
+ * Gets multiple entries by id in one query. Reduces round-trips when loading
+ * many entries. Returns null for missing entry ids.
+ */
+export const getMany = query({
+  args: { entryIds: v.array(v.id("entries")) },
+  returns: v.array(v.union(vEntry, v.null())),
+  handler: async (ctx, args): Promise<(Entry | null)[]> => {
+    return Promise.all(
+      args.entryIds.map(async (entryId) => {
+        const entry = await ctx.db.get(entryId);
+        if (!entry) return null;
+        return publicEntry(entry);
+      }),
+    );
   },
 });
 
@@ -534,6 +761,44 @@ export const deleteAsync = mutation({
   }),
   returns: v.null(),
   handler: deleteAsyncHandler,
+});
+
+/**
+ * Delete multiple entries and their content in one mutation. Reduces
+ * function calls and database round-trips when removing many entries.
+ * All entries must exist; throws if any entryId is not found.
+ */
+export const deleteMany = mutation({
+  args: v.object({
+    entryIds: v.array(v.id("entries")),
+  }),
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    for (const entryId of args.entryIds) {
+      await deleteAsyncHandler(ctx, { entryId });
+    }
+    return null;
+  },
+});
+
+/**
+ * Schedule deletion of multiple entries in the background (one workpool job
+ * per entry). Returns immediately; actual deletes run asynchronously.
+ * Use when you want to avoid holding a long mutation.
+ */
+export const deleteManyAsync = mutation({
+  args: v.object({
+    entryIds: v.array(v.id("entries")),
+  }),
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    for (const entryId of args.entryIds) {
+      await workpool.enqueueMutation(ctx, api.entries.deleteAsync, {
+        entryId,
+      });
+    }
+    return null;
+  },
 });
 
 async function deleteAsyncHandler(
