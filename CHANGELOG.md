@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.4
+
+- Added `searchSimilar(ctx, { namespace, key, ... })` to find similar entries
+  by entry key, using the stored embedding. Like `searchWithEntryId` but
+  identified by key so you don't need to look up the entry first; avoids the
+  embedding process entirely.
+
 ## 0.1.1
 
 - Changelog and dependency cleanup for 0.7.1 → 0.1.x conversion.
@@ -11,7 +18,7 @@
   chunking). One text/embedding per entry instead of multiple chunks.
 - Renamed main export from `RAG` to `StringRAG` (deprecated `RAG` alias
   remains for backward compatibility).
-- Added `searchSimilar(ctx, { entryId, ... })` to find similar entries using
+- Added `searchWithEntryId(ctx, { entryId, ... })` to find similar entries using
   stored embeddings, without embedding a query string.
 - Removed chunk context and chunking from the API and docs; README and types
   updated for the single-content-per-entry model.

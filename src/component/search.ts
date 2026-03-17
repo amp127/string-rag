@@ -393,7 +393,170 @@ export const getEntryEmbedding = internalQuery({
   },
 });
 
+export const getEntryEmbeddingByKey = internalQuery({
+  args: {
+    namespaceId: v.id("namespaces"),
+    key: v.string(),
+  },
+  returns: v.object({
+    embedding: v.array(v.number()),
+    namespaceId: v.id("namespaces"),
+    filterNames: v.array(v.string()),
+    entryId: v.id("entries"),
+  }),
+  handler: async (ctx, args) => {
+    const entry = await ctx.db
+      .query("entries")
+      .withIndex("namespaceId_status_key_version", (q) =>
+        q
+          .eq("namespaceId", args.namespaceId)
+          .eq("status.kind", "ready")
+          .eq("key", args.key),
+      )
+      .order("desc")
+      .first();
+    if (!entry) {
+      throw new Error(
+        `No ready entry found for key "${args.key}" in the given namespace`,
+      );
+    }
+
+    const content = await ctx.db
+      .query("content")
+      .withIndex("entryId", (q) => q.eq("entryId", entry._id))
+      .first();
+    if (!content) {
+      throw new Error(`No content found for entry ${entry._id}`);
+    }
+
+    let embedding: number[];
+    switch (content.state.kind) {
+      case "pending":
+        embedding = content.state.embedding;
+        break;
+      case "ready": {
+        const vector = await ctx.db.get(content.state.embeddingId);
+        if (!vector) {
+          throw new Error(
+            `Vector ${content.state.embeddingId} not found`,
+          );
+        }
+        embedding = vector.vector.slice(0, -1);
+        if (embedding.length === 4095) {
+          embedding.push(0);
+        }
+        break;
+      }
+      case "replaced": {
+        embedding = content.state.vector.slice(0, -1);
+        if (embedding.length === 4095) {
+          embedding.push(0);
+        }
+        break;
+      }
+    }
+
+    const namespace = await ctx.db.get(entry.namespaceId);
+    if (!namespace) {
+      throw new Error(`Namespace ${entry.namespaceId} not found`);
+    }
+
+    return {
+      embedding,
+      namespaceId: entry.namespaceId,
+      filterNames: namespace.filterNames,
+      entryId: entry._id,
+    };
+  },
+});
+
 export const searchSimilar = action({
+  args: {
+    namespace: v.string(),
+    modelId: v.string(),
+    dimension: v.number(),
+    key: v.string(),
+    filters: v.array(vNamedFilter),
+    limit: v.number(),
+    vectorScoreThreshold: v.optional(v.number()),
+  },
+  returns: v.object({
+    results: v.array(vSearchResult),
+    entries: v.array(vEntry),
+  }),
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{
+    results: SearchResult[];
+    entries: Infer<typeof vEntry>[];
+  }> => {
+    const { key, filters, limit } = args;
+
+    const namespaceDoc = await ctx.runQuery(
+      internal.namespaces.getCompatibleNamespace,
+      {
+        namespace: args.namespace,
+        modelId: args.modelId,
+        dimension: args.dimension,
+        filterNames: filters.map((f) => f.name),
+      },
+    );
+    if (!namespaceDoc) {
+      return { results: [], entries: [] };
+    }
+
+    const { embedding, namespaceId, filterNames, entryId } = await ctx.runQuery(
+      internal.search.getEntryEmbeddingByKey,
+      { namespaceId: namespaceDoc._id, key },
+    );
+
+    const numberedFilters = numberedFiltersFromNamedFilters(
+      filters,
+      filterNames,
+    );
+
+    const vectorResults = await searchEmbeddings(ctx, {
+      embedding,
+      namespaceId,
+      filters: numberedFilters,
+      limit: limit + 1,
+    });
+
+    const threshold = args.vectorScoreThreshold ?? -1;
+    const aboveThreshold = vectorResults.filter((r) => r._score >= threshold);
+
+    const { results: contentResults, entries } = await ctx.runQuery(
+      internal.content.getContentByEmbeddingIds,
+      {
+        embeddingIds: aboveThreshold.map((r) => r._id),
+      },
+    );
+
+    const sourceEntryIdStr = entryId as unknown as string;
+    const results = contentResults
+      .map((r, i) =>
+        r ? publicSearchResult(r, aboveThreshold[i]._score) : null,
+      )
+      .filter(
+        (r): r is SearchResult =>
+          r !== null &&
+          (r.entryId as unknown as string) !== sourceEntryIdStr,
+      )
+      .slice(0, limit);
+
+    const resultEntryIds = new Set(results.map((r) => r.entryId));
+
+    return {
+      results,
+      entries: (entries as Infer<typeof vEntry>[]).filter((e) =>
+        resultEntryIds.has(e.entryId),
+      ),
+    };
+  },
+});
+
+export const searchWithEntryId = action({
   args: {
     entryId: v.id("entries"),
     filters: v.array(vNamedFilter),

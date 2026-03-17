@@ -112,12 +112,31 @@ export const search = action({
 
 When you already have an entry (e.g. from a previous search or from `rag.add`), you can find similar entries using its stored embedding—no query string or embedding API call needed. The source entry is excluded from results. Same filters, limit, and `vectorScoreThreshold` as `search`.
 
+**By entry ID** (`searchWithEntryId`):
+
 ```ts
 export const findSimilar = action({
   args: { entryId: v.string() },
   handler: async (ctx, args) => {
-    const { results, text, entries } = await rag.searchSimilar(ctx, {
+    const { results, text, entries } = await rag.searchWithEntryId(ctx, {
       entryId: args.entryId,
+      limit: 5,
+      filters: [{ name: "category", value: "articles" }], // optional
+    });
+    return { results, text, entries };
+  },
+});
+```
+
+**By key** (`searchSimilar`): when you have the entry key and namespace, you can skip looking up the entry and use the stored embedding directly:
+
+```ts
+export const findSimilarByKey = action({
+  args: { namespace: v.string(), key: v.string() },
+  handler: async (ctx, args) => {
+    const { results, text, entries } = await rag.searchSimilar(ctx, {
+      namespace: args.namespace,
+      key: args.key,
       limit: 5,
       filters: [{ name: "category", value: "articles" }], // optional
     });

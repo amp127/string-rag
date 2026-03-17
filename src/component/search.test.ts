@@ -686,7 +686,7 @@ describe("search", () => {
     });
   });
 
-  describe("searchSimilar", () => {
+  describe("searchWithEntryId", () => {
     test("getEntryEmbedding returns embedding and namespace info for ready content", async () => {
       const t = convexTest(schema, modules);
       const namespaceId = await setupTestNamespace(t);
@@ -772,7 +772,7 @@ describe("search", () => {
       ).rejects.toThrow("No content found");
     });
 
-    test("searchSimilar returns entries similar to the given entry and excludes source", async () => {
+    test("searchWithEntryId returns entries similar to the given entry and excludes source", async () => {
       const t = convexTest(schema, modules);
       const namespaceId = await setupTestNamespace(t);
 
@@ -811,7 +811,7 @@ describe("search", () => {
         });
       });
 
-      const result = await t.action(api.search.searchSimilar, {
+      const result = await t.action(api.search.searchWithEntryId, {
         entryId: sourceId,
         filters: [],
         limit: 10,
@@ -829,7 +829,7 @@ describe("search", () => {
       expect(topResult.content.text).toBe("Similar content");
     });
 
-    test("searchSimilar respects filters", async () => {
+    test("searchWithEntryId respects filters", async () => {
       const t = convexTest(schema, modules);
       const namespaceId = await setupTestNamespace(
         t,
@@ -860,7 +860,7 @@ describe("search", () => {
         await insertContent(ctx, { entryId: differentCatId, content });
       });
 
-      const result = await t.action(api.search.searchSimilar, {
+      const result = await t.action(api.search.searchWithEntryId, {
         entryId: sourceId,
         filters: [{ name: "category", value: "articles" }],
         limit: 10,
@@ -871,7 +871,7 @@ describe("search", () => {
       expect(result.results).toHaveLength(1);
     });
 
-    test("searchSimilar respects limit", async () => {
+    test("searchWithEntryId respects limit", async () => {
       const t = convexTest(schema, modules);
       const namespaceId = await setupTestNamespace(t);
 
@@ -916,7 +916,7 @@ describe("search", () => {
         });
       });
 
-      const result = await t.action(api.search.searchSimilar, {
+      const result = await t.action(api.search.searchWithEntryId, {
         entryId: sourceId,
         filters: [],
         limit: 2,
@@ -926,7 +926,7 @@ describe("search", () => {
       expect(result.entries).toHaveLength(2);
     });
 
-    test("searchSimilar applies vectorScoreThreshold", async () => {
+    test("searchWithEntryId applies vectorScoreThreshold", async () => {
       const t = convexTest(schema, modules);
       const namespaceId = await setupTestNamespace(t);
 
@@ -954,12 +954,12 @@ describe("search", () => {
         });
       });
 
-      const noThreshold = await t.action(api.search.searchSimilar, {
+      const noThreshold = await t.action(api.search.searchWithEntryId, {
         entryId: sourceId,
         filters: [],
         limit: 10,
       });
-      const withThreshold = await t.action(api.search.searchSimilar, {
+      const withThreshold = await t.action(api.search.searchWithEntryId, {
         entryId: sourceId,
         filters: [],
         limit: 10,
@@ -974,7 +974,7 @@ describe("search", () => {
       }
     });
 
-    test("searchSimilar throws when entry not found", async () => {
+    test("searchWithEntryId throws when entry not found", async () => {
       const t = convexTest(schema, modules);
       const namespaceId = await setupTestNamespace(t);
       const entryId = await setupTestEntry(t, namespaceId);
@@ -983,12 +983,103 @@ describe("search", () => {
       });
 
       await expect(
-        t.action(api.search.searchSimilar, {
+        t.action(api.search.searchWithEntryId, {
           entryId,
           filters: [],
           limit: 10,
         }),
       ).rejects.toThrow("Entry");
+    });
+  });
+
+  describe("searchSimilar", () => {
+    test("searchSimilar returns entries similar to the given key and excludes source", async () => {
+      const t = convexTest(schema, modules);
+      const namespaceId = await setupTestNamespace(t, "similar-key-ns");
+
+      const sourceId = await setupTestEntry(t, namespaceId, "source", 0);
+      const similarId = await setupTestEntry(t, namespaceId, "similar", 0);
+      const otherId = await setupTestEntry(t, namespaceId, "other", 0);
+
+      const sourceEmbedding = Array(128).fill(0.5);
+      const similarEmbedding = Array(128).fill(0.52);
+      const otherEmbedding = Array(128).fill(0.1);
+
+      await t.run(async (ctx) => {
+        await insertContent(ctx, {
+          entryId: sourceId,
+          content: {
+            content: { text: "Source content", metadata: {} },
+            embedding: sourceEmbedding,
+            searchableText: "Source content",
+          },
+        });
+        await insertContent(ctx, {
+          entryId: similarId,
+          content: {
+            content: { text: "Similar content", metadata: {} },
+            embedding: similarEmbedding,
+            searchableText: "Similar content",
+          },
+        });
+        await insertContent(ctx, {
+          entryId: otherId,
+          content: {
+            content: { text: "Other content", metadata: {} },
+            embedding: otherEmbedding,
+            searchableText: "Other content",
+          },
+        });
+      });
+
+      const result = await t.action(api.search.searchSimilar, {
+        namespace: "similar-key-ns",
+        modelId: "test-model",
+        dimension: 128,
+        key: "source",
+        filters: [],
+        limit: 10,
+      });
+
+      expect(result.results).not.toContainEqual(
+        expect.objectContaining({ entryId: sourceId }),
+      );
+      const resultEntryIds = result.entries.map((e) => e.entryId);
+      expect(resultEntryIds).not.toContain(sourceId);
+      expect(result.results.length).toBeGreaterThan(0);
+      expect(result.entries.length).toBeGreaterThan(0);
+      const topResult = result.results[0];
+      expect(topResult.entryId).toBe(similarId);
+      expect(topResult.content.text).toBe("Similar content");
+    });
+
+    test("searchSimilar returns empty when no compatible namespace", async () => {
+      const t = convexTest(schema, modules);
+      const result = await t.action(api.search.searchSimilar, {
+        namespace: "non-existent-namespace",
+        modelId: "test-model",
+        dimension: 128,
+        key: "any-key",
+        filters: [],
+        limit: 10,
+      });
+      expect(result.results).toHaveLength(0);
+      expect(result.entries).toHaveLength(0);
+    });
+
+    test("searchSimilar throws when no ready entry for key", async () => {
+      const t = convexTest(schema, modules);
+      await setupTestNamespace(t, "empty-key-ns");
+      await expect(
+        t.action(api.search.searchSimilar, {
+          namespace: "empty-key-ns",
+          modelId: "test-model",
+          dimension: 128,
+          key: "no-such-key",
+          filters: [],
+          limit: 10,
+        }),
+      ).rejects.toThrow("No ready entry found");
     });
   });
 });

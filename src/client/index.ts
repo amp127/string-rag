@@ -449,7 +449,7 @@ export class StringRAG<
    * Searches within the entry's own namespace using vector similarity only.
    * The source entry is automatically excluded from results.
    */
-  async searchSimilar(
+  async searchWithEntryId(
     ctx: CtxWith<"runAction">,
     args: {
       /** The entry to find similar entries for. */
@@ -471,9 +471,69 @@ export class StringRAG<
     } = args;
 
     const { results, entries } = await ctx.runAction(
-      this.component.search.searchSimilar,
+      this.component.search.searchWithEntryId,
       {
         entryId,
+        filters,
+        limit,
+        vectorScoreThreshold,
+      },
+    );
+    const entriesWithTexts = entries.map((e) => {
+      const entryResults = results.filter((r) => r.entryId === e.entryId);
+      const text = entryResults.map((r) => r.content.text).join("\n");
+      return { ...e, text } as SearchEntry<FitlerSchemas, EntryMetadata>;
+    });
+
+    return {
+      results: results as SearchResult[],
+      text: entriesWithTexts
+        .map((e) => (e.title ? `## ${e.title}:\n\n${e.text}` : e.text))
+        .join(`\n\n---\n\n`),
+      entries: entriesWithTexts,
+    };
+  }
+
+  /**
+   * Search for entries similar to the entry with the given key, using its
+   * stored embedding. Like `searchWithEntryId` but identified by key so you
+   * don't need to look up the entry first. Avoids the embedding process
+   * entirely by using the existing vector.
+   *
+   * Searches within the entry's namespace. The source entry is excluded from
+   * results. The key must refer to a ready entry in the namespace.
+   */
+  async searchSimilar(
+    ctx: CtxWith<"runAction">,
+    args: {
+      /** The namespace to search in (e.g. a userId). */
+      namespace: string;
+      /** The key of the entry to find similar entries for. */
+      key: string;
+    } & Pick<
+      SearchOptions<FitlerSchemas>,
+      "filters" | "limit" | "vectorScoreThreshold"
+    >,
+  ): Promise<{
+    results: SearchResult[];
+    text: string;
+    entries: SearchEntry<FitlerSchemas, EntryMetadata>[];
+  }> {
+    const {
+      namespace,
+      key,
+      filters = [],
+      limit = DEFAULT_SEARCH_LIMIT,
+      vectorScoreThreshold,
+    } = args;
+
+    const { results, entries } = await ctx.runAction(
+      this.component.search.searchSimilar,
+      {
+        namespace,
+        key,
+        modelId: getModelId(this.options.textEmbeddingModel),
+        dimension: this.options.embeddingDimension,
         filters,
         limit,
         vectorScoreThreshold,

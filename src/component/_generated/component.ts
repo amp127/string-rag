@@ -414,6 +414,38 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "action",
         "internal",
         {
+          dimension: number;
+          filters: Array<{ name: string; value: any }>;
+          key: string;
+          limit: number;
+          modelId: string;
+          namespace: string;
+          vectorScoreThreshold?: number;
+        },
+        {
+          entries: Array<{
+            contentHash?: string;
+            entryId: string;
+            filterValues: Array<{ name: string; value: any }>;
+            importance: number;
+            key?: string;
+            metadata?: Record<string, any>;
+            replacedAt?: number;
+            status: "pending" | "ready" | "replaced";
+            title?: string;
+          }>;
+          results: Array<{
+            content: { metadata?: Record<string, any>; text: string };
+            entryId: string;
+            score: number;
+          }>;
+        },
+        Name
+      >;
+      searchWithEntryId: FunctionReference<
+        "action",
+        "internal",
+        {
           entryId: string;
           filters: Array<{ name: string; value: any }>;
           limit: number;

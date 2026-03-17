@@ -110,15 +110,32 @@ export const search = action({
   },
 });
 
-export const searchSimilar = action({
+export const searchWithEntryId = action({
   args: {
     entryId: v.string(),
     limit: v.optional(v.number()),
     vectorScoreThreshold: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    return rag.searchSimilar(ctx, {
+    return rag.searchWithEntryId(ctx, {
       entryId: args.entryId as EntryId,
+      limit: args.limit ?? 10,
+      vectorScoreThreshold: args.vectorScoreThreshold,
+    });
+  },
+});
+
+export const searchSimilar = action({
+  args: {
+    namespace: v.string(),
+    key: v.string(),
+    limit: v.optional(v.number()),
+    vectorScoreThreshold: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    return rag.searchSimilar(ctx, {
+      namespace: args.namespace,
+      key: args.key,
       limit: args.limit ?? 10,
       vectorScoreThreshold: args.vectorScoreThreshold,
     });
@@ -130,6 +147,7 @@ const testApi: ApiFromModules<{
     findEntryByContentHash: typeof findEntryByContentHash;
     add: typeof add;
     search: typeof search;
+    searchWithEntryId: typeof searchWithEntryId;
     searchSimilar: typeof searchSimilar;
   };
 }>["fns"] = anyApi["index.test"] as any;
@@ -416,7 +434,7 @@ Content 3`,
     });
   });
 
-  describe("searchSimilar", () => {
+  describe("searchWithEntryId", () => {
     test("returns entries similar to the given entry and excludes source", async () => {
       const t = initConvexTest(schema);
 
@@ -439,7 +457,7 @@ Content 3`,
         title: "Other",
       });
 
-      const { results, entries, text } = await t.action(testApi.searchSimilar, {
+      const { results, entries, text } = await t.action(testApi.searchWithEntryId, {
         entryId: sourceId,
         limit: 10,
       });
@@ -476,7 +494,7 @@ Content 3`,
         namespace: "limit-similar",
       });
 
-      const { results, entries } = await t.action(testApi.searchSimilar, {
+      const { results, entries } = await t.action(testApi.searchWithEntryId, {
         entryId: sourceId,
         limit: 2,
       });
@@ -495,8 +513,74 @@ Content 3`,
         title: "Shape Doc",
       });
 
-      const out = await t.action(testApi.searchSimilar, {
+      const out = await t.action(testApi.searchWithEntryId, {
         entryId,
+        limit: 5,
+      });
+
+      expect(out).toHaveProperty("results");
+      expect(out).toHaveProperty("text");
+      expect(out).toHaveProperty("entries");
+      expect(Array.isArray(out.results)).toBe(true);
+      expect(Array.isArray(out.entries)).toBe(true);
+      expect(typeof out.text).toBe("string");
+      expect(out).not.toHaveProperty("usage");
+    });
+  });
+
+  describe("searchSimilar", () => {
+    test("returns entries similar to the given key and excludes source", async () => {
+      const t = initConvexTest(schema);
+
+      await addWithDummyContent(t, {
+        key: "source-doc",
+        text: "Source document about machine learning",
+        namespace: "similar-key-test",
+        title: "Source",
+      });
+      await addWithDummyContent(t, {
+        key: "similar-doc",
+        text: "Similar document about ML and neural networks",
+        namespace: "similar-key-test",
+        title: "Similar",
+      });
+      await addWithDummyContent(t, {
+        key: "other-doc",
+        text: "Unrelated document about cooking recipes",
+        namespace: "similar-key-test",
+        title: "Other",
+      });
+
+      const { results, entries, text } = await t.action(testApi.searchSimilar, {
+        namespace: "similar-key-test",
+        key: "source-doc",
+        limit: 10,
+      });
+
+      const sourceEntry = entries.find((e) => e.key === "source-doc");
+      const resultEntryIds = entries.map((e) => e.entryId);
+      if (sourceEntry) {
+        expect(resultEntryIds).not.toContain(sourceEntry.entryId);
+      }
+      expect(results.length).toBeGreaterThan(0);
+      expect(entries.length).toBeGreaterThan(0);
+      expect(text).not.toContain("Source document");
+      expect(text).toContain("---");
+    });
+
+    test("returns same shape as searchWithEntryId (results, text, entries) without usage", async () => {
+      const t = initConvexTest(schema);
+
+      await addWithDummyContent(t, {
+        key: "shape-key-test",
+        text: "Shape test content",
+        namespace: "shape-key-ns",
+        title: "Shape Doc",
+      });
+
+      const out = await t.action(testApi.searchSimilar, {
+        namespace: "shape-key-ns",
+        key: "shape-key-test",
         limit: 5,
       });
 
