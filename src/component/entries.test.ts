@@ -362,6 +362,56 @@ describe("entries", () => {
     expect(firstDoc!.status.kind).toBe("replaced");
   });
 
+  test("cleanupReplacedEntriesAsync removes replaced entries via workpool", async () => {
+    const t = initConvexTest();
+    const namespaceId = await setupTestNamespace(t);
+
+    const entry = testEntryArgs(namespaceId);
+
+    const firstResult = await t.mutation(api.entries.add, {
+      entry,
+      content: testContentArgs(),
+    });
+    expect(firstResult.status).toBe("ready");
+
+    const modifiedEntry = { ...entry, contentHash: "hash456" };
+    const pendingResult = await t.mutation(api.entries.add, {
+      entry: modifiedEntry,
+    });
+    expect(pendingResult.status).toBe("pending");
+
+    await t.mutation(api.content.insert, {
+      entryId: pendingResult.entryId,
+      content: {
+        content: { text: "Pending entry content" },
+        embedding: Array.from({ length: 128 }, () => 0.5),
+        searchableText: "Pending entry content",
+      },
+    });
+    await t.mutation(api.content.replaceContent, {
+      entryId: pendingResult.entryId,
+    });
+    await t.mutation(api.entries.promoteToReady, {
+      entryId: pendingResult.entryId,
+    });
+
+    const replacedDoc = await t.run(async (ctx) => {
+      return ctx.db.get(firstResult.entryId);
+    });
+    expect(replacedDoc!.status.kind).toBe("replaced");
+
+    await t.mutation(api.entries.cleanupReplacedEntriesAsync, {
+      namespaceId,
+    });
+
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+
+    const afterCleanup = await t.run(async (ctx) => {
+      return ctx.db.get(firstResult.entryId);
+    });
+    expect(afterCleanup).toBeNull();
+  });
+
   test("deleteAsync deletes entry and content", async () => {
     const t = initConvexTest();
     const namespaceId = await setupTestNamespace(t);

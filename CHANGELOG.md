@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.9
+
+- **Bugfix:** `addAsyncOnComplete` and `addAsyncBatchOnComplete` now call
+  `replaceContent` before `promoteToReady`, matching sync `add`, so pending
+  content is promoted and `pendingContentEmbeddings` rows are removed.
+- **`cleanupReplacedEntriesAsync`:** Background cleanup of `replaced` entries
+  per namespace via the workpool (10 entries per job, chained until done).
+  Component: `entries.cleanupReplacedEntriesAsync` / internal
+  `cleanupReplacedEntriesBatch`; client: `rag.cleanupReplacedEntriesAsync`.
+
 ## 0.1.8
 
 - **Breaking (`addManyAsyncBatch` contract):** `defineBatchTextProcessor` now

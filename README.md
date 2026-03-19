@@ -481,6 +481,9 @@ Async batch variants (return immediately; work runs in the background):
   `maxBatchSize` cap (default 100).
 - **`deleteManyAsync(ctx, { entryIds })`** — Schedules one background delete per
   entry (via workpool). Use when you want to avoid a long-running mutation.
+- **`cleanupReplacedEntriesAsync(ctx, { namespaceId })`** — Deletes entries in
+  `replaced` status for that namespace in the background. Each workpool job
+  removes up to 10 entries and enqueues another job until none remain.
 
 All batch operations are limited to a single namespace (e.g. one `namespace` or
 `namespaceId` for the whole batch).

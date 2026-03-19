@@ -172,6 +172,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         },
         Name
       >;
+      cleanupReplacedEntriesAsync: FunctionReference<
+        "mutation",
+        "internal",
+        { namespaceId: string },
+        null,
+        Name
+      >;
       deleteAsync: FunctionReference<
         "mutation",
         "internal",

@@ -67,6 +67,9 @@ const workpool = new Workpool(components.workpool, {
   maxParallelism: 10,
 });
 
+/** Entries deleted per workpool job when cleaning up replaced rows. */
+const REPLACED_CLEANUP_BATCH_SIZE = 10;
+
 /** Internal: add a single entry asynchronously via content processor. Used by addAsync and addManyAsync. */
 async function addAsyncOneEntryHandler(
   ctx: MutationCtx,
@@ -320,7 +323,10 @@ export const addAsyncBatchOnComplete = internalMutation({
       const namespace = await ctx.db.get(entry.namespaceId);
       assert(namespace, `Namespace ${entry.namespaceId} not found`);
       if (args.result.kind === "success") {
-        await promoteToReadyHandler(ctx, { entryId });
+        const replaceStatus = await replaceContentHandler(ctx, entryId);
+        if (replaceStatus !== "replaced") {
+          await promoteToReadyHandler(ctx, { entryId });
+        }
       } else if (
         entry.status.kind === "pending" &&
         entry.status.onComplete
@@ -357,7 +363,10 @@ export const addAsyncOnComplete = internalMutation({
       return;
     }
     if (args.result.kind === "success") {
-      await promoteToReadyHandler(ctx, { entryId });
+      const replaceStatus = await replaceContentHandler(ctx, entryId);
+      if (replaceStatus !== "replaced") {
+        await promoteToReadyHandler(ctx, { entryId });
+      }
     } else {
       // await deleteAsyncHandler(ctx, { entryId, startOrder: 0 });
       const namespace = await ctx.db.get(entry.namespaceId);
@@ -1007,6 +1016,58 @@ export const deleteManyAsync = mutation({
         entryId,
       });
     }
+    return null;
+  },
+});
+
+/**
+ * Deletes replaced entries (and their content) for a namespace in the
+ * background. Each workpool job removes up to 10 entries; another job is
+ * enqueued while a full batch was deleted.
+ */
+export const cleanupReplacedEntriesBatch = internalMutation({
+  args: v.object({
+    namespaceId: v.id("namespaces"),
+  }),
+  returns: v.object({
+    deleted: v.number(),
+    scheduledMore: v.boolean(),
+  }),
+  handler: async (ctx, args) => {
+    const entries = await ctx.db
+      .query("entries")
+      .withIndex("status_namespaceId", (q) =>
+        q.eq("status.kind", "replaced").eq("namespaceId", args.namespaceId),
+      )
+      .take(REPLACED_CLEANUP_BATCH_SIZE);
+    for (const row of entries) {
+      await deleteAsyncHandler(ctx, { entryId: row._id });
+    }
+    if (entries.length === REPLACED_CLEANUP_BATCH_SIZE) {
+      await workpool.enqueueMutation(
+        ctx,
+        internal.entries.cleanupReplacedEntriesBatch,
+        { namespaceId: args.namespaceId },
+      );
+    }
+    return {
+      deleted: entries.length,
+      scheduledMore: entries.length === REPLACED_CLEANUP_BATCH_SIZE,
+    };
+  },
+});
+
+export const cleanupReplacedEntriesAsync = mutation({
+  args: v.object({
+    namespaceId: v.id("namespaces"),
+  }),
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    await workpool.enqueueMutation(
+      ctx,
+      internal.entries.cleanupReplacedEntriesBatch,
+      { namespaceId: args.namespaceId },
+    );
     return null;
   },
 });

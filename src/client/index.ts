@@ -1239,6 +1239,24 @@ export class StringRAG<
   }
 
   /**
+   * Delete entries in `replaced` status for a namespace in the background.
+   * Uses the workpool: each job removes up to 10 entries and chains until none
+   * remain.
+   */
+  async cleanupReplacedEntriesAsync(
+    ctx: CtxWith<"runMutation">,
+    args: { namespaceId: NamespaceId },
+  ): Promise<void> {
+    const ref = this.component.entries as unknown as Record<
+      string,
+      FunctionReference<"mutation", "internal", any, any>
+    >;
+    await ctx.runMutation(ref.cleanupReplacedEntriesAsync, {
+      namespaceId: args.namespaceId as unknown as string,
+    });
+  }
+
+  /**
    * Delete an entry and its content (synchronously).
    * If you are getting warnings about `ctx` not being compatible,
    * you're likely running this in a mutation.
