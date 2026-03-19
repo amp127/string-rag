@@ -147,6 +147,31 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         },
         Name
       >;
+      addManyAsyncBatch: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          batchTextProcessor: string;
+          items: Array<{
+            entry: {
+              contentHash?: string;
+              filterValues: Array<{ name: string; value: any }>;
+              importance: number;
+              key?: string;
+              metadata?: Record<string, any>;
+              title?: string;
+            };
+            onComplete?: string;
+          }>;
+          namespaceId: string;
+        },
+        {
+          created: Array<boolean>;
+          entryIds: Array<string>;
+          statuses: Array<"pending" | "ready">;
+        },
+        Name
+      >;
       deleteAsync: FunctionReference<
         "mutation",
         "internal",

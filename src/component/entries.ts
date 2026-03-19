@@ -5,10 +5,16 @@ import {
   PaginationResult,
 } from "convex/server";
 import { v, type Infer, type Value } from "convex/values";
-import type { ContentProcessorAction, EntryFilter, EntryId } from "../shared.js";
+import type {
+  BatchTextProcessorAction,
+  ContentProcessorAction,
+  EntryFilter,
+  EntryId,
+} from "../shared.js";
 import {
   statuses,
   vActiveStatus,
+  vBatchTextProcessorArgs,
   vCreateContentArgs,
   vContentProcessorArgs,
   vEntry,
@@ -129,6 +135,60 @@ async function addAsyncOneEntryHandler(
   return { entryId, status: status.kind, created: true };
 }
 
+/** Create pending entry for async add without enqueueing workpool (for batch path). */
+async function addAsyncOneEntryPendingOnly(
+  ctx: MutationCtx,
+  args: {
+    entry: {
+      namespaceId: Id<"namespaces">;
+      key?: string;
+      title?: string;
+      metadata?: Record<string, Value>;
+      importance: number;
+      filterValues: EntryFilter[];
+      contentHash?: string;
+    };
+    onComplete?: string;
+  },
+): Promise<{
+  entryId: Id<"entries">;
+  status: "pending" | "ready";
+  created: boolean;
+  needsBatchWork: boolean;
+}> {
+  const { namespaceId, key } = args.entry;
+  const namespace = await ctx.db.get(namespaceId);
+  assert(namespace, `Namespace ${namespaceId} not found`);
+  const existing = await findExistingEntry(ctx, namespaceId, key);
+  if (
+    existing?.status.kind === "ready" &&
+    entryIsSame(existing, args.entry)
+  ) {
+    return {
+      entryId: existing._id,
+      status: existing.status.kind,
+      created: false,
+      needsBatchWork: false,
+    };
+  }
+  const version = existing ? existing.version + 1 : 0;
+  const status: StatusWithOnComplete = {
+    kind: "pending",
+    onComplete: args.onComplete,
+  };
+  const entryId = await ctx.db.insert("entries", {
+    ...args.entry,
+    version,
+    status,
+  });
+  return {
+    entryId,
+    status: "pending",
+    created: true,
+    needsBatchWork: true,
+  };
+}
+
 export const addAsync = mutation({
   args: {
     entry: v.object({
@@ -202,6 +262,80 @@ export const testContentProcessor = internalAction({
         content,
       },
     );
+    return null;
+  },
+});
+
+/** Test-only: processes a full batch with one action (dummy content per entry). */
+export const testBatchTextProcessor = internalAction({
+  args: vBatchTextProcessorArgs,
+  returns: v.null(),
+  handler: async (ctx, args): Promise<null> => {
+    for (const entry of args.entries) {
+      const content = {
+        content: { text: "batch-test" },
+        embedding: Array.from({ length: 128 }, () => 0.15),
+        searchableText: "batch-test",
+      };
+      await ctx.runMutation(
+        args.insertContent as unknown as Parameters<
+          ActionCtx["runMutation"]
+        >[0],
+        {
+          entryId: entry.entryId as unknown as Id<"entries">,
+          content,
+        },
+      );
+    }
+    return null;
+  },
+});
+
+export const getTestBatchTextProcessorHandle = internalMutation({
+  args: {},
+  returns: v.string(),
+  handler: async (_ctx): Promise<string> => {
+    return createFunctionHandle(internal.entries.testBatchTextProcessor);
+  },
+});
+
+export const addAsyncBatchOnComplete = internalMutation({
+  args: {
+    workId: vWorkIdValidator,
+    context: v.id("asyncBatchWork"),
+    result: vResultValidator,
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const batch = await ctx.db.get(args.context);
+    if (!batch) {
+      console.error(
+        `asyncBatchWork ${args.context} not found for batched async add onComplete`,
+      );
+      return null;
+    }
+    for (const entryId of batch.entryIds) {
+      const entry = await ctx.db.get(entryId);
+      if (!entry) continue;
+      const namespace = await ctx.db.get(entry.namespaceId);
+      assert(namespace, `Namespace ${entry.namespaceId} not found`);
+      if (args.result.kind === "success") {
+        await promoteToReadyHandler(ctx, { entryId });
+      } else if (
+        entry.status.kind === "pending" &&
+        entry.status.onComplete
+      ) {
+        await runOnComplete(
+          ctx,
+          entry.status.onComplete,
+          namespace,
+          entry,
+          null,
+          args.result.kind === "canceled" ? "Canceled" : args.result.error,
+        );
+      }
+    }
+    await ctx.db.delete(args.context);
     return null;
   },
 });
@@ -436,6 +570,82 @@ export const addManyAsync = mutation({
       statuses.push(result.status);
       created.push(result.created);
     }
+    return { entryIds, statuses, created };
+  },
+});
+
+/**
+ * One workpool job for the whole batch. Use with a batch text processor that
+ * returns texts in entry order; the client runs embedMany once then inserts all.
+ */
+export const addManyAsyncBatch = mutation({
+  args: {
+    namespaceId: v.id("namespaces"),
+    items: v.array(
+      v.object({
+        entry: vAddManyItemEntry,
+        onComplete: v.optional(v.string()),
+      }),
+    ),
+    batchTextProcessor: v.string(),
+  },
+  returns: v.object({
+    entryIds: v.array(v.id("entries")),
+    statuses: v.array(vActiveStatus),
+    created: v.array(v.boolean()),
+  }),
+  handler: async (ctx, args) => {
+    const namespace = await ctx.db.get(args.namespaceId);
+    assert(
+      namespace,
+      `Namespace ${args.namespaceId} not found for addManyAsyncBatch`,
+    );
+    const insertContentHandle = await createFunctionHandle(api.content.insert);
+    const entryIds: Id<"entries">[] = [];
+    const statuses: ("pending" | "ready")[] = [];
+    const created: boolean[] = [];
+    const batchEntryIds: Id<"entries">[] = [];
+    for (const item of args.items) {
+      const result = await addAsyncOneEntryPendingOnly(ctx, {
+        entry: { ...item.entry, namespaceId: args.namespaceId },
+        onComplete: item.onComplete,
+      });
+      entryIds.push(result.entryId);
+      statuses.push(result.status);
+      created.push(result.created);
+      if (result.needsBatchWork) {
+        batchEntryIds.push(result.entryId);
+      }
+    }
+    if (batchEntryIds.length === 0) {
+      return { entryIds, statuses, created };
+    }
+    const batchId = await ctx.db.insert("asyncBatchWork", {
+      entryIds: batchEntryIds,
+    });
+    const entriesPayload = await Promise.all(
+      batchEntryIds.map(async (id) => {
+        const doc = await ctx.db.get(id);
+        assert(doc, `Entry ${id} not found`);
+        return publicEntry(doc);
+      }),
+    );
+    const batchTextProcessorAction =
+      args.batchTextProcessor as unknown as BatchTextProcessorAction;
+    await workpool.enqueueAction(
+      ctx,
+      batchTextProcessorAction,
+      {
+        namespace: publicNamespace(namespace),
+        entries: entriesPayload,
+        insertContent: insertContentHandle,
+      },
+      {
+        name: `rag-async-batch-${namespace.namespace}-${batchId}`,
+        onComplete: internal.entries.addAsyncBatchOnComplete,
+        context: batchId,
+      },
+    );
     return { entryIds, statuses, created };
   },
 });

@@ -91,6 +91,11 @@ export const schema = defineSchema({
       filterFields: allFilterFieldNames,
     }),
 
+  /** Tracks entry ids for a single batched async add (one workpool job + shared onComplete). */
+  asyncBatchWork: defineTable({
+    entryIds: v.array(v.id("entries")),
+  }),
+
   ...embeddingsTables,
 });
 

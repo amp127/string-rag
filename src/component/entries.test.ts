@@ -876,6 +876,51 @@ describe("entries", () => {
     expect(entries.every((e) => e!.status.kind === "pending")).toBe(true);
   });
 
+  test("addManyAsyncBatch runs one batched action then promotes all entries", async () => {
+    const t = initConvexTest();
+    const namespaceId = await setupTestNamespace(t);
+    const batchHandle = await t.mutation(
+      internal.entries.getTestBatchTextProcessorHandle,
+      {},
+    );
+    function entryWithoutNamespace(
+      namespaceId: Id<"namespaces">,
+      key: string,
+    ) {
+      const { namespaceId: _n, ...rest } = testEntryArgs(namespaceId, key);
+      return rest;
+    }
+
+    const result = await t.mutation(api.entries.addManyAsyncBatch, {
+      namespaceId,
+      items: [
+        { entry: entryWithoutNamespace(namespaceId, "batch-async-1") },
+        { entry: entryWithoutNamespace(namespaceId, "batch-async-2") },
+        { entry: entryWithoutNamespace(namespaceId, "batch-async-3") },
+      ],
+      batchTextProcessor: batchHandle,
+    });
+
+    expect(result.entryIds).toHaveLength(3);
+    expect(result.statuses).toEqual(["pending", "pending", "pending"]);
+    expect(result.created).toEqual([true, true, true]);
+
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+
+    const entries = await t.run(async (ctx) => {
+      return Promise.all(
+        result.entryIds.map((id) => ctx.db.get(id)),
+      );
+    });
+    expect(entries.every((e) => e !== null)).toBe(true);
+    expect(entries.every((e) => e!.status.kind === "ready")).toBe(true);
+
+    const batchRows = await t.run(async (ctx) => {
+      return ctx.db.query("asyncBatchWork").collect();
+    });
+    expect(batchRows).toHaveLength(0);
+  });
+
   test("deleteManyAsync schedules deletes and entries are removed after run", async () => {
     const t = initConvexTest();
     const namespaceId = await setupTestNamespace(t);

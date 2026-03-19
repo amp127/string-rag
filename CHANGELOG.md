@@ -2,6 +2,11 @@
 
 ## 0.1.6
 
+- **`addManyAsyncBatch` + `defineBatchTextProcessor`:** One workpool action per
+  batch; user returns texts per entry, library calls **`embedMany` once** then
+  inserts. Component: `asyncBatchWork` table, `addManyAsyncBatch`,
+  `addAsyncBatchOnComplete`, test helpers `testBatchTextProcessor` /
+  `getTestBatchTextProcessorHandle`.
 - **Breaking (component schema):** Pending content `state` is now only
   `{ kind: "pending", searchableText? }` (no inline embedding/importance).
   Vectors are stored in `pendingContentEmbeddings` until `replaceContent`

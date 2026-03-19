@@ -1,5 +1,6 @@
 import {
   embed,
+  embedMany,
   generateText,
   type EmbeddingModel,
   type EmbeddingModelUsage,
@@ -28,11 +29,13 @@ import type { NamedFilter } from "../component/filters.js";
 import {
   filterNamesContain,
   OnCompleteArgs,
+  vBatchTextProcessorArgs,
   vContentProcessorArgs,
   vEntryId,
   vNamespaceId,
   vOnCompleteArgs,
   vSearchType,
+  type BatchTextProcessorAction,
   type ContentProcessorAction,
   type CreateContentArgs,
   type Entry,
@@ -51,6 +54,7 @@ import {
 export { hybridRank } from "./hybridRank.js";
 export { vEntryId, vNamespaceId, vSearchType };
 export type {
+  BatchTextProcessorAction,
   ContentProcessorAction,
   Entry,
   EntryId,
@@ -89,32 +93,26 @@ type DoEmbedResult = {
 };
 
 /**
- * Embed a single value. Uses the model's doEmbed when the model is an object
- * so we avoid the AI SDK's embed() path that calls logWarnings with possibly
- * undefined warnings (which crashes when the provider omits warnings).
+ * Embed a single value via the AI SDK's `embed` (one request).
  */
 async function embedSafe(params: {
   model: EmbeddingModel;
   value: string;
 }): Promise<{ embedding: number[]; usage?: EmbeddingModelUsage }> {
-  const result = await embedManySafe({
+  const { embedding, usage } = await embed({
     model: params.model,
-    values: [params.value],
+    value: params.value,
   });
-  const embedding = result.embeddings[0];
-  if (!embedding) {
-    throw new Error("Embedding model returned no embedding");
-  }
   return {
-    embedding,
-    usage: result.usage,
+    embedding: Array.isArray(embedding) ? embedding : Array.from(embedding),
+    usage,
   };
 }
 
 /**
- * Embed multiple values in one call when the model supports doEmbed(values).
- * Reduces API calls and latency when adding many entries. Falls back to
- * embedding one-by-one when the model does not support batch embed.
+ * Embed multiple values: uses the model's `doEmbed` when present, otherwise
+ * `embedMany` so the provider gets one batched request (with chunking if the
+ * model has per-call limits) instead of N parallel `embed` calls.
  */
 async function embedManySafe(params: {
   model: EmbeddingModel;
@@ -136,14 +134,13 @@ async function embedManySafe(params: {
       usage: result.usage ?? { tokens: 0 },
     };
   }
-  const results = await Promise.all(
-    values.map((value) => embed({ model, value })),
-  );
-  const embeddings = results.map((r) => r.embedding);
-  const usage: EmbeddingModelUsage = {
-    tokens: results.reduce((sum, r) => sum + (r.usage?.tokens ?? 0), 0),
+  const { embeddings, usage } = await embedMany({ model, values });
+  return {
+    embeddings: embeddings.map((e) =>
+      Array.isArray(e) ? e : Array.from(e),
+    ),
+    usage,
   };
-  return { embeddings, usage };
 }
 
 // This is 0-1 with 1 being the most important and 0 being totally irrelevant.
@@ -596,6 +593,97 @@ export class StringRAG<
       namespaceId: namespaceId as unknown as string,
       items: itemsForMutation,
     })) as {
+      entryIds: string[];
+      statuses: ("pending" | "ready")[];
+      created: boolean[];
+    };
+
+    return {
+      entryIds: rawResult.entryIds as EntryId[],
+      statuses: rawResult.statuses,
+      created: rawResult.created,
+    };
+  }
+
+  /**
+   * Add many entries with **one workpool job** and **one `embedMany` call**.
+   * Your `batchTextProcessor` returns one string per entry (same order as
+   * pending entries); StringRAG embeds all texts in a batch, then inserts each.
+   * Skips embedding for items that short-circuit as already-ready duplicates
+   * (same as `addManyAsync`).
+   */
+  async addManyAsyncBatch(
+    ctx: CtxWith<"runMutation">,
+    args: (NamespaceSelection & { maxBatchSize?: number }) & {
+      items: Array<
+        EntryArgs<FitlerSchemas, EntryMetadata> & { onComplete?: OnComplete }
+      >;
+      batchTextProcessor: BatchTextProcessorAction;
+    },
+  ): Promise<{
+    entryIds: EntryId[];
+    statuses: ("pending" | "ready")[];
+    created: boolean[];
+  }> {
+    if (args.items.length === 0) {
+      return { entryIds: [], statuses: [], created: [] };
+    }
+    const maxBatchSize =
+      args.maxBatchSize ?? DEFAULT_ADD_MANY_BATCH_SIZE;
+    if (args.items.length > maxBatchSize) {
+      throw new Error(
+        `addManyAsyncBatch: items length ${args.items.length} exceeds maxBatchSize ${maxBatchSize}. Split into smaller batches.`,
+      );
+    }
+
+    let namespaceId: NamespaceId;
+    if ("namespaceId" in args) {
+      namespaceId = args.namespaceId;
+    } else {
+      const namespace = await this.getOrCreateNamespace(ctx, {
+        namespace: args.namespace,
+        status: "ready",
+      });
+      namespaceId = namespace.namespaceId;
+    }
+
+    for (const item of args.items) {
+      validateAddFilterValues(item.filterValues, this.options.filterNames);
+    }
+
+    const onCompleteHandles = await Promise.all(
+      args.items.map((item) =>
+        item.onComplete ? createFunctionHandle(item.onComplete) : undefined,
+      ),
+    );
+    const batchTextProcessor = await createFunctionHandle(
+      args.batchTextProcessor,
+    );
+
+    const itemsForMutation = args.items.map((item, i) => ({
+      entry: {
+        key: item.key,
+        title: item.title,
+        metadata: item.metadata,
+        filterValues: item.filterValues ?? [],
+        importance: item.importance ?? 1,
+        contentHash: item.contentHash,
+      },
+      onComplete: onCompleteHandles[i],
+    }));
+
+    const addManyAsyncBatchRef = this.component.entries as unknown as Record<
+      string,
+      FunctionReference<"mutation", "internal", any, any>
+    >;
+    const rawResult = (await ctx.runMutation(
+      addManyAsyncBatchRef.addManyAsyncBatch,
+      {
+        namespaceId: namespaceId as unknown as string,
+        items: itemsForMutation,
+        batchTextProcessor,
+      },
+    )) as {
       entryIds: string[];
       statuses: ("pending" | "ready")[];
       created: boolean[];
@@ -1302,6 +1390,99 @@ export class StringRAG<
             content,
           },
         );
+      },
+    });
+  }
+
+  /**
+   * Batch async add: return one string per entry (fetch/synthesize text).
+   * StringRAG runs a single `embedMany` then inserts all entries.
+   */
+  defineBatchTextProcessor<DataModel extends GenericDataModel>(
+    fn: (
+      ctx: GenericActionCtx<DataModel>,
+      args: {
+        namespace: Namespace;
+        entries: Entry<FitlerSchemas, EntryMetadata>[];
+      },
+    ) => Promise<string[]>,
+  ): RegisteredAction<
+    "internal",
+    FunctionArgs<BatchTextProcessorAction>,
+    FunctionReturnType<BatchTextProcessorAction>
+  > {
+    return internalActionGeneric({
+      args: vBatchTextProcessorArgs,
+      handler: async (ctx, args) => {
+        const { namespace, entries } = args;
+        const modelId = getModelId(this.options.textEmbeddingModel);
+        if (namespace.modelId !== modelId) {
+          console.error(
+            `You are using a different embedding model ${modelId} for batch async ` +
+              `than the namespace: ${namespace.modelId}`,
+          );
+          return;
+        }
+        if (namespace.dimension !== this.options.embeddingDimension) {
+          console.error(
+            `You are using a different embedding dimension ${this.options.embeddingDimension} for batch async ` +
+              `than the namespace: ${namespace.dimension}`,
+          );
+          return;
+        }
+        if (
+          !filterNamesContain(
+            namespace.filterNames,
+            this.options.filterNames ?? [],
+          )
+        ) {
+          console.error(
+            `Filter names mismatch for batch async vs namespace.`,
+          );
+          return;
+        }
+        const texts = await fn(ctx, {
+          namespace,
+          entries: entries as Entry<FitlerSchemas, EntryMetadata>[],
+        });
+        if (texts.length !== entries.length) {
+          throw new Error(
+            `batchTextProcessor must return ${entries.length} strings, got ${texts.length}`,
+          );
+        }
+        if (texts.length === 0) {
+          return;
+        }
+        const { embeddings } = await embedMany({
+          model: this.options.textEmbeddingModel,
+          values: texts,
+        });
+        for (let i = 0; i < entries.length; i++) {
+          const embedding = embeddings[i];
+          if (!embedding) {
+            throw new Error("embedMany returned fewer embeddings than texts");
+          }
+          const vec: number[] = Array.isArray(embedding)
+            ? (embedding as number[])
+            : Array.from(embedding as ArrayLike<number>);
+          const text = texts[i];
+          assert(text !== undefined, "text");
+          await ctx.runMutation(
+            args.insertContent as FunctionHandle<
+              "mutation",
+              FunctionArgs<ComponentApi["content"]["insert"]>,
+              null
+            >,
+            {
+              entryId: entries[i]!.entryId,
+              content: {
+                content: { text },
+                embedding: vec,
+                searchableText: text,
+              },
+            },
+          );
+        }
       },
     });
   }

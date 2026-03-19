@@ -222,6 +222,19 @@ export type ContentProcessorAction = FunctionReference<
   null
 >;
 
+export const vBatchTextProcessorArgs = v.object({
+  namespace: vNamespace,
+  entries: v.array(vEntry),
+  insertContent: v.string(),
+});
+
+export type BatchTextProcessorAction = FunctionReference<
+  "action",
+  "internal",
+  IdsToStrings<Infer<typeof vBatchTextProcessorArgs>>,
+  null
+>;
+
 /**
  * Check if the args filter names are compatible with the existing filter names.
  * @param existing The existing filter names.
