@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.8
+
+- **Breaking (`addManyAsyncBatch` contract):** `defineBatchTextProcessor` now
+  returns full content payloads per entry (same shape as
+  `defineContentProcessor`), i.e. `{ content: CreateContentArgs }`.
+- Batch processors no longer return plain strings and the client no longer runs
+  internal `embedMany` for this path; embedding is now owned by user code for
+  parity with `addAsync` / `addManyAsync`.
+- Batch content now supports `content.metadata` the same way as non-batch async
+  processors.
+- README updated to document the new batch return shape.
+
 ## 0.1.6
 
 - **`addManyAsyncBatch` + `defineBatchTextProcessor`:** One workpool action per

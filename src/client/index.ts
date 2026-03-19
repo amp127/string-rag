@@ -92,6 +92,8 @@ type DoEmbedResult = {
   usage?: { tokens: number };
 };
 
+export type BatchTextProcessorOutput = { content: CreateContentArgs };
+
 /**
  * Embed a single value via the AI SDK's `embed` (one request).
  */
@@ -606,9 +608,9 @@ export class StringRAG<
   }
 
   /**
-   * Add many entries with **one workpool job** and **one `embedMany` call**.
-   * Your `batchTextProcessor` returns one string per entry (same order as
-   * pending entries); StringRAG embeds all texts in a batch, then inserts each.
+   * Add many entries with **one workpool job**.
+   * Your `batchTextProcessor` returns one full content object per entry (same
+   * order as pending entries), matching `defineContentProcessor`.
    * Skips embedding for items that short-circuit as already-ready duplicates
    * (same as `addManyAsync`).
    */
@@ -1395,8 +1397,8 @@ export class StringRAG<
   }
 
   /**
-   * Batch async add: return one string per entry (fetch/synthesize text).
-   * StringRAG runs a single `embedMany` then inserts all entries.
+   * Batch async add: return one item per entry (fetch/synthesize text).
+   * Items return full content objects, same shape as `defineContentProcessor`.
    */
   defineBatchTextProcessor<DataModel extends GenericDataModel>(
     fn: (
@@ -1405,7 +1407,7 @@ export class StringRAG<
         namespace: Namespace;
         entries: Entry<FitlerSchemas, EntryMetadata>[];
       },
-    ) => Promise<string[]>,
+    ) => Promise<BatchTextProcessorOutput[]>,
   ): RegisteredAction<
     "internal",
     FunctionArgs<BatchTextProcessorAction>,
@@ -1441,32 +1443,23 @@ export class StringRAG<
           );
           return;
         }
-        const texts = await fn(ctx, {
+        const outputs = await fn(ctx, {
           namespace,
           entries: entries as Entry<FitlerSchemas, EntryMetadata>[],
         });
-        if (texts.length !== entries.length) {
+        if (outputs.length !== entries.length) {
           throw new Error(
-            `batchTextProcessor must return ${entries.length} strings, got ${texts.length}`,
+            `batchTextProcessor must return ${entries.length} items, got ${outputs.length}`,
           );
         }
-        if (texts.length === 0) {
+        if (outputs.length === 0) {
           return;
         }
-        const { embeddings } = await embedMany({
-          model: this.options.textEmbeddingModel,
-          values: texts,
-        });
         for (let i = 0; i < entries.length; i++) {
-          const embedding = embeddings[i];
-          if (!embedding) {
-            throw new Error("embedMany returned fewer embeddings than texts");
-          }
-          const vec: number[] = Array.isArray(embedding)
-            ? (embedding as number[])
-            : Array.from(embedding as ArrayLike<number>);
-          const text = texts[i];
-          assert(text !== undefined, "text");
+          const output = outputs[i];
+          assert(output !== undefined, "output");
+          const entry = entries[i];
+          assert(entry !== undefined, "entry");
           await ctx.runMutation(
             args.insertContent as FunctionHandle<
               "mutation",
@@ -1474,12 +1467,8 @@ export class StringRAG<
               null
             >,
             {
-              entryId: entries[i]!.entryId,
-              content: {
-                content: { text },
-                embedding: vec,
-                searchableText: text,
-              },
+              entryId: entry.entryId,
+              content: output.content,
             },
           );
         }

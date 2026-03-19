@@ -474,10 +474,11 @@ Async batch variants (return immediately; work runs in the background):
 - **`addManyAsyncBatch(ctx, { namespace, items, batchTextProcessor })`** — **One
   workpool job** for the whole batch. Define `batchTextProcessor` with
   `rag.defineBatchTextProcessor(async (ctx, { entries }) => { ... })`: return
-  one string per entry (same order as `entries`, e.g. after fetching URLs).
-  StringRAG runs **`embedMany` once** on those strings, then inserts each
-  entry. Duplicates that short-circuit as already-ready (same as `addManyAsync`)
-  are omitted from the batch. Same `maxBatchSize` cap (default 100).
+  one item per entry (same order as `entries`), where each item is
+  `{ content: { content: { text, metadata? }, embedding, searchableText? } }`
+  (same shape as `defineContentProcessor` return). Duplicates that short-circuit
+  as already-ready (same as `addManyAsync`) are omitted from the batch. Same
+  `maxBatchSize` cap (default 100).
 - **`deleteManyAsync(ctx, { entryIds })`** — Schedules one background delete per
   entry (via workpool). Use when you want to avoid a long-running mutation.
 
