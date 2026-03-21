@@ -17,7 +17,7 @@ import {
 } from "../shared.js";
 import type { Doc, Id } from "./_generated/dataModel.js";
 import { type vContentResult } from "./content.js";
-import { publicEntry } from "./entries.js";
+import { publicEntry } from "./helpers.js";
 import { hybridRank } from "../client/hybridRank.js";
 import { vVectorId, type VectorTableId } from "./embeddings/tables.js";
 import { getPendingEmbeddingForContent } from "./pendingEmbedding.js";

@@ -13,7 +13,7 @@ import {
 import { insertEmbedding } from "./embeddings/index.js";
 import { vVectorId } from "./embeddings/tables.js";
 import { schema, v } from "./schema.js";
-import { getPreviousEntry, publicEntry } from "./entries.js";
+import { getPreviousEntry, publicEntry } from "./helpers.js";
 import {
   filterFieldsFromNumbers,
   numberedFilterFromNamedFilters,

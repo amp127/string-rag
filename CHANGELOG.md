@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.10
+
+- Merged upstream [get-convex/rag](https://github.com/get-convex/rag) through
+  v0.7.2: `deleteNamespaceSync` deletes entries for every entry status with
+  correct pagination; shared `deleteEntrySync` helper (here implemented for the
+  single-content model via `deleteContent` + entry removal, not chunks); shared
+  helpers module; namespace sync-delete test; CI circular-dependency check;
+  lockfile and tooling updates from upstream where applicable.
+
 ## 0.1.9
 
 - **Bugfix:** `addAsyncOnComplete` and `addAsyncBatchOnComplete` now call

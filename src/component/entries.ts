@@ -1,4 +1,11 @@
+import {
+  vResultValidator,
+  vWorkIdValidator,
+  Workpool,
+} from "@convex-dev/workpool";
 import { assert, omit } from "convex-helpers";
+import { mergedStream, stream } from "convex-helpers/server/stream";
+import { doc } from "convex-helpers/validators";
 import {
   createFunctionHandle,
   paginationOptsValidator,
@@ -9,7 +16,7 @@ import type {
   BatchTextProcessorAction,
   ContentProcessorAction,
   EntryFilter,
-  EntryId,
+  OnComplete,
 } from "../shared.js";
 import {
   statuses,
@@ -22,7 +29,7 @@ import {
   vStatus,
   type Entry,
 } from "../shared.js";
-import { api, internal } from "./_generated/api.js";
+import { api, components, internal } from "./_generated/api.js";
 import type { Doc, Id } from "./_generated/dataModel.js";
 import {
   action,
@@ -40,22 +47,14 @@ import {
   insertContent,
   replaceContentHandler,
 } from "./content.js";
-import schema, { type StatusWithOnComplete } from "./schema.js";
-import { mergedStream } from "convex-helpers/server/stream";
-import { stream } from "convex-helpers/server/stream";
 import {
   getCompatibleNamespaceHandler,
+  getPreviousEntry,
+  publicEntry,
   publicNamespace,
   vNamespaceLookupArgs,
-} from "./namespaces.js";
-import type { OnComplete } from "../shared.js";
-import {
-  vResultValidator,
-  vWorkIdValidator,
-  Workpool,
-} from "@convex-dev/workpool";
-import { components } from "./_generated/api.js";
-import { doc } from "convex-helpers/validators";
+} from "./helpers.js";
+import schema, { type StatusWithOnComplete } from "./schema.js";
 
 const workpool = new Workpool(components.workpool, {
   retryActionsByDefault: true,
@@ -922,58 +921,6 @@ async function promoteToReadyHandler(
   };
 }
 
-export async function getPreviousEntry(ctx: QueryCtx, entry: Doc<"entries">) {
-  if (!entry.key) {
-    return null;
-  }
-  const previousEntry = await ctx.db
-    .query("entries")
-    .withIndex("namespaceId_status_key_version", (q) =>
-      q
-        .eq("namespaceId", entry.namespaceId)
-        .eq("status.kind", "ready")
-        .eq("key", entry.key),
-    )
-    .unique();
-  if (previousEntry?._id === entry._id) return null;
-  return previousEntry;
-}
-
-export function publicEntry(entry: {
-  _id: Id<"entries">;
-  key?: string | undefined;
-  importance: number;
-  filterValues: EntryFilter[];
-  contentHash?: string | undefined;
-  title?: string | undefined;
-  metadata?: Record<string, Value> | undefined;
-  status: StatusWithOnComplete;
-}): Entry {
-  const { key, importance, filterValues, contentHash, title, metadata } = entry;
-
-  const fields = {
-    entryId: entry._id as unknown as EntryId,
-    key,
-    title,
-    metadata,
-    importance,
-    filterValues,
-    contentHash,
-  };
-  if (entry.status.kind === "replaced") {
-    return {
-      ...fields,
-      status: "replaced" as const,
-      replacedAt: entry.status.replacedAt,
-    };
-  } else {
-    return {
-      ...fields,
-      status: entry.status.kind,
-    };
-  }
-}
-
 export const deleteAsync = mutation({
   args: v.object({
     entryId: v.id("entries"),
@@ -1088,11 +1035,13 @@ async function deleteAsyncHandler(
 export const deleteSync = action({
   args: { entryId: v.id("entries") },
   returns: v.null(),
-  handler: async (ctx, { entryId }) => {
-    await ctx.runMutation(internal.content.deleteContent, { entryId });
-    await ctx.runMutation(internal.entries._del, { entryId });
-  },
+  handler: async (ctx, { entryId }) => deleteEntrySync(ctx, entryId),
 });
+
+export async function deleteEntrySync(ctx: ActionCtx, entryId: Id<"entries">) {
+  await ctx.runMutation(internal.content.deleteContent, { entryId });
+  await ctx.runMutation(internal.entries._del, { entryId });
+}
 
 export const _del = internalMutation({
   args: { entryId: v.id("entries") },
@@ -1170,9 +1119,7 @@ export const deleteByKeySync = action({
         { namespaceId: args.namespaceId, key: args.key },
       );
       for await (const entry of entries) {
-        await ctx.runAction(api.entries.deleteSync, {
-          entryId: entry._id,
-        });
+        await deleteEntrySync(ctx, entry._id);
       }
       if (entries.length <= 100) {
         break;

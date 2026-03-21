@@ -14,6 +14,7 @@ import type * as embeddings_index from "../embeddings/index.js";
 import type * as embeddings_tables from "../embeddings/tables.js";
 import type * as entries from "../entries.js";
 import type * as filters from "../filters.js";
+import type * as helpers from "../helpers.js";
 import type * as namespaces from "../namespaces.js";
 import type * as pendingEmbedding from "../pendingEmbedding.js";
 import type * as search from "../search.js";
@@ -32,6 +33,7 @@ const fullApi: ApiFromModules<{
   "embeddings/tables": typeof embeddings_tables;
   entries: typeof entries;
   filters: typeof filters;
+  helpers: typeof helpers;
   namespaces: typeof namespaces;
   pendingEmbedding: typeof pendingEmbedding;
   search: typeof search;
