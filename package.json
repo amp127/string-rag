@@ -1,7 +1,10 @@
 {
   "name": "string-rag",
   "description": "A RAG component for Convex.",
-  "repository": "github:amp127/string-rag",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/amp127/string-rag.git"
+  },
   "homepage": "https://github.com/amp127/string-rag#readme",
   "bugs": {
     "url": "https://github.com/amp127/string-rag/issues"

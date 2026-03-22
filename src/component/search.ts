@@ -22,6 +22,19 @@ import { hybridRank } from "../client/hybridRank.js";
 import { vVectorId, type VectorTableId } from "./embeddings/tables.js";
 import { getPendingEmbeddingForContent } from "./pendingEmbedding.js";
 
+const vEntryEmbeddingPayload = v.object({
+  embedding: v.array(v.number()),
+  namespaceId: v.id("namespaces"),
+  filterNames: v.array(v.string()),
+});
+
+const vEntryEmbeddingByKeyPayload = v.object({
+  embedding: v.array(v.number()),
+  namespaceId: v.id("namespaces"),
+  filterNames: v.array(v.string()),
+  entryId: v.id("entries"),
+});
+
 export const search = action({
   args: {
     namespace: v.string(),
@@ -331,15 +344,11 @@ export const getEntryEmbedding = internalQuery({
   args: {
     entryId: v.id("entries"),
   },
-  returns: v.object({
-    embedding: v.array(v.number()),
-    namespaceId: v.id("namespaces"),
-    filterNames: v.array(v.string()),
-  }),
+  returns: v.union(v.null(), vEntryEmbeddingPayload),
   handler: async (ctx, args) => {
     const entry = await ctx.db.get(args.entryId);
     if (!entry) {
-      throw new Error(`Entry ${args.entryId} not found`);
+      return null;
     }
 
     const content = await ctx.db
@@ -347,7 +356,7 @@ export const getEntryEmbedding = internalQuery({
       .withIndex("entryId", (q) => q.eq("entryId", args.entryId))
       .first();
     if (!content) {
-      throw new Error(`No content found for entry ${args.entryId}`);
+      return null;
     }
 
     let embedding: number[];
@@ -358,9 +367,7 @@ export const getEntryEmbedding = internalQuery({
           content._id,
         );
         if (!pending) {
-          throw new Error(
-            `No pending embedding stored for content ${content._id}`,
-          );
+          return null;
         }
         embedding = pending;
         break;
@@ -368,9 +375,7 @@ export const getEntryEmbedding = internalQuery({
       case "ready": {
         const vector = await ctx.db.get(content.state.embeddingId);
         if (!vector) {
-          throw new Error(
-            `Vector ${content.state.embeddingId} not found`,
-          );
+          return null;
         }
         // Strip the importance weight dimension appended by vectorWithImportance
         embedding = vector.vector.slice(0, -1);
@@ -393,7 +398,7 @@ export const getEntryEmbedding = internalQuery({
 
     const namespace = await ctx.db.get(entry.namespaceId);
     if (!namespace) {
-      throw new Error(`Namespace ${entry.namespaceId} not found`);
+      return null;
     }
 
     return {
@@ -409,12 +414,7 @@ export const getEntryEmbeddingByKey = internalQuery({
     namespaceId: v.id("namespaces"),
     key: v.string(),
   },
-  returns: v.object({
-    embedding: v.array(v.number()),
-    namespaceId: v.id("namespaces"),
-    filterNames: v.array(v.string()),
-    entryId: v.id("entries"),
-  }),
+  returns: v.union(v.null(), vEntryEmbeddingByKeyPayload),
   handler: async (ctx, args) => {
     const entry = await ctx.db
       .query("entries")
@@ -427,9 +427,7 @@ export const getEntryEmbeddingByKey = internalQuery({
       .order("desc")
       .first();
     if (!entry) {
-      throw new Error(
-        `No ready entry found for key "${args.key}" in the given namespace`,
-      );
+      return null;
     }
 
     const content = await ctx.db
@@ -437,7 +435,7 @@ export const getEntryEmbeddingByKey = internalQuery({
       .withIndex("entryId", (q) => q.eq("entryId", entry._id))
       .first();
     if (!content) {
-      throw new Error(`No content found for entry ${entry._id}`);
+      return null;
     }
 
     let embedding: number[];
@@ -448,9 +446,7 @@ export const getEntryEmbeddingByKey = internalQuery({
           content._id,
         );
         if (!pending) {
-          throw new Error(
-            `No pending embedding stored for content ${content._id}`,
-          );
+          return null;
         }
         embedding = pending;
         break;
@@ -458,9 +454,7 @@ export const getEntryEmbeddingByKey = internalQuery({
       case "ready": {
         const vector = await ctx.db.get(content.state.embeddingId);
         if (!vector) {
-          throw new Error(
-            `Vector ${content.state.embeddingId} not found`,
-          );
+          return null;
         }
         embedding = vector.vector.slice(0, -1);
         if (embedding.length === 4095) {
@@ -479,7 +473,7 @@ export const getEntryEmbeddingByKey = internalQuery({
 
     const namespace = await ctx.db.get(entry.namespaceId);
     if (!namespace) {
-      throw new Error(`Namespace ${entry.namespaceId} not found`);
+      return null;
     }
 
     return {
@@ -527,10 +521,14 @@ export const searchSimilar = action({
       return { results: [], entries: [] };
     }
 
-    const { embedding, namespaceId, filterNames, entryId } = await ctx.runQuery(
-      internal.search.getEntryEmbeddingByKey,
-      { namespaceId: namespaceDoc._id, key },
-    );
+    const loaded = await ctx.runQuery(internal.search.getEntryEmbeddingByKey, {
+      namespaceId: namespaceDoc._id,
+      key,
+    });
+    if (!loaded) {
+      return { results: [], entries: [] };
+    }
+    const { embedding, namespaceId, filterNames, entryId } = loaded;
 
     const numberedFilters = numberedFiltersFromNamedFilters(
       filters,
@@ -597,10 +595,13 @@ export const searchWithEntryId = action({
   }> => {
     const { entryId, filters, limit } = args;
 
-    const { embedding, namespaceId, filterNames } = await ctx.runQuery(
-      internal.search.getEntryEmbedding,
-      { entryId },
-    );
+    const loaded = await ctx.runQuery(internal.search.getEntryEmbedding, {
+      entryId,
+    });
+    if (!loaded) {
+      return { results: [], entries: [] };
+    }
+    const { embedding, namespaceId, filterNames } = loaded;
 
     const numberedFilters = numberedFiltersFromNamedFilters(
       filters,

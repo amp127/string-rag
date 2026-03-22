@@ -802,6 +802,9 @@ export class StringRAG<
    *
    * Searches within the entry's own namespace using vector similarity only.
    * The source entry is automatically excluded from results.
+   *
+   * Returns empty `results` and `entries` when the entry does not exist, has
+   * no content, or has no usable stored embedding yet.
    */
   async searchWithEntryId(
     ctx: CtxWith<"runAction">,
@@ -855,7 +858,8 @@ export class StringRAG<
    * entirely by using the existing vector.
    *
    * Searches within the entry's namespace. The source entry is excluded from
-   * results. The key must refer to a ready entry in the namespace.
+   * results. If no ready entry exists for the key or it has no usable embedding,
+   * returns empty `results` and `entries`.
    */
   async searchSimilar(
     ctx: CtxWith<"runAction">,

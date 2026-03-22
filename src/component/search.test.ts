@@ -707,11 +707,12 @@ describe("search", () => {
       const result = await t.query(internal.search.getEntryEmbedding, {
         entryId,
       });
+      expect(result).not.toBeNull();
 
       // Stored vector is normalized and importance-scaled; we strip the weight dim
-      expect(result.embedding).toHaveLength(128);
-      expect(result.namespaceId).toBe(namespaceId);
-      expect(result.filterNames).toEqual([]);
+      expect(result!.embedding).toHaveLength(128);
+      expect(result!.namespaceId).toBe(namespaceId);
+      expect(result!.filterNames).toEqual([]);
     });
 
     test("getEntryEmbedding returns embedding for pending content", async () => {
@@ -744,13 +745,14 @@ describe("search", () => {
       const result = await t.query(internal.search.getEntryEmbedding, {
         entryId,
       });
+      expect(result).not.toBeNull();
 
-      expect(result.embedding).toHaveLength(128);
-      expect(result.embedding.every((v) => v === 0.3)).toBe(true);
-      expect(result.namespaceId).toBe(namespaceId);
+      expect(result!.embedding).toHaveLength(128);
+      expect(result!.embedding.every((v) => v === 0.3)).toBe(true);
+      expect(result!.namespaceId).toBe(namespaceId);
     });
 
-    test("getEntryEmbedding throws when entry not found", async () => {
+    test("getEntryEmbedding returns null when entry not found", async () => {
       const t = convexTest(schema, modules);
       const namespaceId = await setupTestNamespace(t);
       const entryId = await setupTestEntry(t, namespaceId);
@@ -758,20 +760,22 @@ describe("search", () => {
         await ctx.db.delete(entryId);
       });
 
-      await expect(
-        t.query(internal.search.getEntryEmbedding, { entryId }),
-      ).rejects.toThrow("Entry");
+      const result = await t.query(internal.search.getEntryEmbedding, {
+        entryId,
+      });
+      expect(result).toBeNull();
     });
 
-    test("getEntryEmbedding throws when entry has no content", async () => {
+    test("getEntryEmbedding returns null when entry has no content", async () => {
       const t = convexTest(schema, modules);
       const namespaceId = await setupTestNamespace(t);
       const entryId = await setupTestEntry(t, namespaceId, "no-content-entry");
       // Do not insert any content for this entry
 
-      await expect(
-        t.query(internal.search.getEntryEmbedding, { entryId }),
-      ).rejects.toThrow("No content found");
+      const result = await t.query(internal.search.getEntryEmbedding, {
+        entryId,
+      });
+      expect(result).toBeNull();
     });
 
     test("searchWithEntryId returns entries similar to the given entry and excludes source", async () => {
@@ -976,7 +980,7 @@ describe("search", () => {
       }
     });
 
-    test("searchWithEntryId throws when entry not found", async () => {
+    test("searchWithEntryId returns empty when entry not found", async () => {
       const t = convexTest(schema, modules);
       const namespaceId = await setupTestNamespace(t);
       const entryId = await setupTestEntry(t, namespaceId);
@@ -984,13 +988,13 @@ describe("search", () => {
         await ctx.db.delete(entryId);
       });
 
-      await expect(
-        t.action(api.search.searchWithEntryId, {
-          entryId,
-          filters: [],
-          limit: 10,
-        }),
-      ).rejects.toThrow("Entry");
+      const result = await t.action(api.search.searchWithEntryId, {
+        entryId,
+        filters: [],
+        limit: 10,
+      });
+      expect(result.results).toHaveLength(0);
+      expect(result.entries).toHaveLength(0);
     });
   });
 
@@ -1069,19 +1073,19 @@ describe("search", () => {
       expect(result.entries).toHaveLength(0);
     });
 
-    test("searchSimilar throws when no ready entry for key", async () => {
+    test("searchSimilar returns empty when no ready entry for key", async () => {
       const t = convexTest(schema, modules);
       await setupTestNamespace(t, "empty-key-ns");
-      await expect(
-        t.action(api.search.searchSimilar, {
-          namespace: "empty-key-ns",
-          modelId: "test-model",
-          dimension: 128,
-          key: "no-such-key",
-          filters: [],
-          limit: 10,
-        }),
-      ).rejects.toThrow("No ready entry found");
+      const result = await t.action(api.search.searchSimilar, {
+        namespace: "empty-key-ns",
+        modelId: "test-model",
+        dimension: 128,
+        key: "no-such-key",
+        filters: [],
+        limit: 10,
+      });
+      expect(result.results).toHaveLength(0);
+      expect(result.entries).toHaveLength(0);
     });
   });
 });
