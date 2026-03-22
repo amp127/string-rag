@@ -96,6 +96,16 @@ export const schema = defineSchema({
     entryIds: v.array(v.id("entries")),
   }),
 
+  /** Cross-namespace embedding cache keyed by model + dimension + text hash. */
+  embeddingCache: defineTable({
+    modelId: v.string(),
+    dimension: v.number(),
+    textHash: v.string(),
+    embedding: v.array(v.number()),
+  })
+    .index("by_modelId_dimension_hash", ["modelId", "dimension", "textHash"])
+    .index("by_dimension", ["dimension"]),
+
   ...embeddingsTables,
 });
 

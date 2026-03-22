@@ -150,6 +150,18 @@ export async function contentHashFromArrayBuffer(
 }
 
 /**
+ * SHA-256 hash of UTF-8 text. Used for embedding cache keys (same algorithm as
+ * {@link contentHashFromArrayBuffer}).
+ */
+export async function hashText(
+  text: string,
+  algorithm: "SHA-256" | "SHA-1" = "SHA-256",
+): Promise<string> {
+  const encoder = new TextEncoder();
+  return contentHashFromArrayBuffer(encoder.encode(text).buffer, algorithm);
+}
+
+/**
  * Split a filename into a keyword-friendly string. Specifically adds sections
  * of camelCase and TitleCase into a space-separated strings.
  * e.g. "MyFile is soGreat.txt" -> "MyFile is soGreat.txt My File so Great"

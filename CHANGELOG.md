@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.1.11
+
+- **Breaking:** Removed the `RAG` re-export; use `StringRAG` from `"string-rag"`.
+- **Fix:** `embeddingCache.lookupBatch` now returns rows in the same order as
+  `textHashes` (parallel lookups no longer race on `push`).
+- **Fix:** `embeddingCache.clear({ dimension })` without `modelId` now deletes
+  only that dimension (was clearing the entire cache). New index `by_dimension`
+  on `embeddingCache`.
+- **Export:** `componentWithEmbeddingCache` and `EmbeddingCacheApi` for typed
+  access to cache internal queries/mutations from app code.
+
+- **Embedding cache (opt-in):** Set `enableEmbeddingCache: true` on `StringRAG`
+  to use the component `embeddingCache` table; `add`, `addMany`, and string
+  `search` reuse cached vectors per `modelId`, dimension, and content hash.
+  `content.insert` accepts `populateEmbeddingCache`; sync adds and
+  `defineContentProcessor` / `defineBatchTextProcessor` set it when caching is on.
+  `clearEmbeddingCache` no-ops when caching is disabled.
+- **Raw entry embeddings:** Component query `search.embeddingForEntry` and
+  client `getEmbeddingForEntry` return the stored vector for a ready entry when
+  namespace matches the configured model and dimension.
+
 ## 0.1.10
 
 - Merged upstream [get-convex/rag](https://github.com/get-convex/rag) through
@@ -77,8 +98,8 @@
 
 - **Breaking:** Package simplified to a single content source per entry (no
   chunking). One text/embedding per entry instead of multiple chunks.
-- Renamed main export from `RAG` to `StringRAG` (deprecated `RAG` alias
-  remains for backward compatibility).
+- Renamed main export from `RAG` to `StringRAG` (a `RAG` alias existed until
+  it was removed in a later release).
 - Added `searchWithEntryId(ctx, { entryId, ... })` to find similar entries using
   stored embeddings, without embedding a query string.
 - Removed chunk context and chunking from the API and docs; README and types

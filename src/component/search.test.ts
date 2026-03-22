@@ -778,6 +778,78 @@ describe("search", () => {
       expect(result).toBeNull();
     });
 
+    test("embeddingForEntry returns embedding when model and dimension match", async () => {
+      const t = convexTest(schema, modules);
+      const namespaceId = await setupTestNamespace(t);
+      const entryId = await setupTestEntry(t, namespaceId);
+      const embedding = Array(128).fill(0.5);
+
+      await t.run(async (ctx) => {
+        await insertContent(ctx, {
+          entryId,
+          content: {
+            content: { text: "Ready content", metadata: {} },
+            embedding,
+            searchableText: "Ready content",
+          },
+        });
+      });
+
+      const result = await t.query(api.search.embeddingForEntry, {
+        entryId,
+        modelId: "test-model",
+        dimension: 128,
+      });
+      expect(result).not.toBeNull();
+      expect(result!.embedding).toHaveLength(128);
+    });
+
+    test("embeddingForEntry returns null when modelId does not match", async () => {
+      const t = convexTest(schema, modules);
+      const namespaceId = await setupTestNamespace(t);
+      const entryId = await setupTestEntry(t, namespaceId);
+      await t.run(async (ctx) => {
+        await insertContent(ctx, {
+          entryId,
+          content: {
+            content: { text: "Ready content", metadata: {} },
+            embedding: Array(128).fill(0.1),
+            searchableText: "Ready content",
+          },
+        });
+      });
+
+      const result = await t.query(api.search.embeddingForEntry, {
+        entryId,
+        modelId: "other-model",
+        dimension: 128,
+      });
+      expect(result).toBeNull();
+    });
+
+    test("embeddingForEntry returns null when dimension does not match", async () => {
+      const t = convexTest(schema, modules);
+      const namespaceId = await setupTestNamespace(t);
+      const entryId = await setupTestEntry(t, namespaceId);
+      await t.run(async (ctx) => {
+        await insertContent(ctx, {
+          entryId,
+          content: {
+            content: { text: "Ready content", metadata: {} },
+            embedding: Array(128).fill(0.1),
+            searchableText: "Ready content",
+          },
+        });
+      });
+
+      const result = await t.query(api.search.embeddingForEntry, {
+        entryId,
+        modelId: "test-model",
+        dimension: 256,
+      });
+      expect(result).toBeNull();
+    });
+
     test("searchWithEntryId returns entries similar to the given entry and excludes source", async () => {
       const t = convexTest(schema, modules);
       const namespaceId = await setupTestNamespace(t);

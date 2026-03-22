@@ -436,6 +436,7 @@ async function addOneEntryHandler(
     };
     onComplete?: string;
     content?: Infer<typeof vCreateContentArgs>;
+    populateEmbeddingCache?: boolean;
   },
 ): Promise<{
   entryId: Id<"entries">;
@@ -466,6 +467,7 @@ async function addOneEntryHandler(
     const { status } = await insertContent(ctx, {
       entryId,
       content: args.content,
+      populateEmbeddingCache: args.populateEmbeddingCache,
     });
     if (status === "ready") {
       await promoteToReadyHandler(ctx, { entryId });
@@ -494,6 +496,7 @@ const vAddManyItemEntry = v.object({
 export const addMany = mutation({
   args: {
     namespaceId: v.id("namespaces"),
+    populateEmbeddingCache: v.optional(v.boolean()),
     items: v.array(
       v.object({
         entry: vAddManyItemEntry,
@@ -521,6 +524,7 @@ export const addMany = mutation({
         entry: { ...item.entry, namespaceId: args.namespaceId },
         onComplete: item.onComplete,
         content: item.content,
+        populateEmbeddingCache: args.populateEmbeddingCache,
       });
       entryIds.push(result.entryId);
       statuses.push(result.status);
@@ -663,6 +667,7 @@ export const add = mutation({
     entry: vEntryWithoutVersionStatus,
     onComplete: v.optional(v.string()),
     content: v.optional(vCreateContentArgs),
+    populateEmbeddingCache: v.optional(v.boolean()),
   },
   returns: v.object({
     entryId: v.id("entries"),

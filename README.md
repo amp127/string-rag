@@ -7,8 +7,6 @@
 A component for semantic search, usually used to look up context for LLMs. Use
 with an Agent for Retrieval-Augmented Generation (RAG). One content per entry.
 
-[![Use AI to search HUGE amounts of text with the RAG Component](https://thumbs.video-to-markdown.com/1ff18153.jpg)](https://youtu.be/dGmtAmdAaFs)
-
 ## ✨ Key Features
 
 - **Add Content**: Add or replace content with text and embeddings (one content
@@ -19,6 +17,26 @@ with an Agent for Retrieval-Augmented Generation (RAG). One content per entry.
 - **Importance Weighting**: Weight content by providing a 0 to 1 "importance".
 - **Graceful Migrations**: Migrate content or whole namespaces without
   disruption.
+
+## Compared to Convex RAG (`get-convex/rag`)
+
+StringRAG started from the [Convex RAG component](https://github.com/get-convex/rag)
+and still tracks useful upstream fixes, but the **data model and API are
+different**:
+
+| | Convex RAG | StringRAG |
+| --- | --- | --- |
+| **Indexing unit** | Chunked documents (many chunks per entry) | **One content row per entry** (whole text + one vector) |
+| **Client class** | `RAG` | `StringRAG` |
+| **Search** | Vector search over chunks | Vector search, optional **full-text** and **hybrid** (`searchType`, RRF via [`hybridRank`](#hybridrank)) |
+| **Similarity without a query** | — | **`searchWithEntryId`**, **`searchSimilar`** (stored embedding vs namespace) |
+| **Embeddings** | Per chunk from `text` | Per entry; optional **precomputed** `content.embedding`; **`defineContentProcessor`** / batch processors own embedding |
+| **Extras** | — | **Embedding cache** (reuse vectors by model + dimension + text hash), **`getEmbeddingForEntry`**, batch **`addMany`** / async variants, **`cleanupReplacedEntriesAsync`** |
+
+If you need long documents split into overlapping chunks with per-chunk context,
+use upstream Convex RAG. If each logical item is a single string (or one custom
+vector) and you want hybrid search, similarity-by-key, or tighter control over
+the stored vector, use StringRAG.
 
 Found a bug? Feature request?
 [File it here](https://github.com/amp127/string-rag/issues).
@@ -55,6 +73,25 @@ const rag = new StringRAG(components.rag, {
   embeddingDimension: 1536, // Needs to match your embedding model
 });
 ```
+
+### Embedding cache (opt-in)
+
+By default, each `add` / `addMany` / string `search` calls your embedding model as
+usual. Set **`enableEmbeddingCache: true`** on the `StringRAG` constructor to
+enable a persistent component table keyed by model id, embedding dimension, and
+a hash of the text. Identical text then reuses the stored vector **across
+namespaces** that share the same model and dimension, so you skip redundant
+embedding API calls. When enabled, `content.insert` also records embeddings
+from **`defineContentProcessor`** / **`defineBatchTextProcessor`** (via
+`populateEmbeddingCache`).
+
+Use **`rag.clearEmbeddingCache(ctx)`** to drop rows (e.g. after a provider
+changes an embedding model). With caching off, that method returns `0` and does
+nothing.
+
+If you implement a **custom** content processor that calls `content.insert`
+directly (not via `defineContentProcessor`), pass **`populateEmbeddingCache:
+true`** on the insert args when you want those writes to populate the cache.
 
 ## Add context to RAG
 
@@ -107,6 +144,27 @@ export const search = action({
   },
 });
 ```
+
+### Hybrid and full-text search
+
+`rag.search` supports a `searchType` option:
+
+- **`"vector"`** (default): embedding similarity only. Scores are cosine similarity.
+- **`"text"`**: Convex full-text search on indexed content only. No embedding call; `usage` is `{ tokens: 0 }`. Scores are rank-based (highest for the top hit, decreasing down the list).
+- **`"hybrid"`**: runs **both**—the string query is embedded for vector search **and** passed to full-text search. Results are merged with **Reciprocal Rank Fusion** ([`hybridRank`](#hybridrank)): two ordered lists of content IDs (vector hits, then text hits) are fused with `k = 10` and optional weights `vectorWeight` and `textWeight` (default `1` each). Items strong in both lists rise to the top. The returned scores are still **rank-based** on the fused order (not raw RRF or cosine values). `vectorScoreThreshold` still filters vector candidates before fusion.
+
+```ts
+const { results, text, entries, usage } = await rag.search(ctx, {
+  namespace: "global",
+  query: args.query,
+  searchType: "hybrid",
+  vectorWeight: 1,
+  textWeight: 1,
+  limit: 10,
+});
+```
+
+Hybrid and text modes require a **string** query (not a precomputed embedding array).
 
 ### Search for similar entries
 
@@ -194,7 +252,7 @@ you provide a filter with a more complex value, such as `categoryAndType` below.
 ```ts
 // convex/example.ts
 import { components } from "./_generated/api";
-import { RAG } from "string-rag";
+import { StringRAG } from "string-rag";
 // Any AI SDK model that supports embeddings will work.
 import { openai } from "@ai-sdk/openai";
 
@@ -348,6 +406,200 @@ await rag.add(ctx, {
   },
 });
 ```
+
+### Weighted aggregate embeddings
+
+The component embeds a **single string** by default. That does not let you say
+“this part of the text should influence the vector more than that part.” For
+example, a **title** plus several **criteria** lines: a plain concatenation
+often lets the longer criteria dominate the embedding, because the model
+averages meaning over the full input.
+
+**Pattern (implemented in your app, not inside the component):**
+
+1. Embed each part separately (e.g. one call for the title, one per criterion).
+2. **L2-normalize** each vector (unit length).
+3. Form a **weighted sum**: e.g. `w_title * titleVec + Σ_i w_i * criterionVec_i`,
+   where non-negative weights reflect how much each part should steer similarity.
+   You can fix a **budget** (e.g. 70% title, 30% split across criteria) and
+   assign **per-criterion weights** inside the criteria budget so “core” lines
+   pull similarity more than “flavor” lines.
+4. **L2-normalize the sum again** before storing. Convex vector search uses
+   cosine similarity; the final normalization keeps scores well-behaved.
+
+Helpers and a **70% title / 30% criteria** split (criteria share the budget
+evenly; you can replace that with per-line weights—see comment in code):
+
+```ts
+function l2Normalize(v: number[]): number[] {
+  const mag = Math.sqrt(v.reduce((s, x) => s + x * x, 0));
+  return mag === 0 ? v : v.map((x) => x / mag);
+}
+
+const DEFAULT_WEIGHTS = { title: 0.7, criteriaTotal: 0.3 };
+
+function weightedAggregateEmbedding(args: {
+  titleVec: number[];
+  criterionVecs: number[];
+  weights?: { title: number; criteriaTotal: number };
+}): number[] {
+  const w = args.weights ?? DEFAULT_WEIGHTS;
+  const titleNorm = l2Normalize(args.titleVec);
+  const n = args.criterionVecs.length;
+  if (n === 0) return titleNorm;
+
+  const wEach = w.criteriaTotal / n; // or: split w.criteriaTotal by relative weights per criterion
+  const dim = titleNorm.length;
+  const sum = new Array(dim).fill(0);
+  for (let d = 0; d < dim; d++) sum[d] = w.title * titleNorm[d];
+  for (const raw of args.criterionVecs) {
+    const cNorm = l2Normalize(raw);
+    for (let d = 0; d < dim; d++) sum[d] += wEach * cNorm[d];
+  }
+  return l2Normalize(sum);
+}
+```
+
+Use it from a content processor (same pattern works if you pass `content` from
+`rag.add` in an action):
+
+```ts
+// Assumes `weightedAggregateEmbedding` / `l2Normalize` from the snippet above.
+import { embed, embedMany } from "ai";
+import { openai } from "@ai-sdk/openai";
+
+const model = openai.embedding("text-embedding-3-small");
+
+export const weightedEntryProcessor = rag.defineContentProcessor(
+  async (ctx, args) => {
+    const meta = args.entry.metadata as {
+      title?: string;
+      criteria?: string[];
+    };
+    const title = (meta.title ?? "").trim() || "<empty>";
+    const criteria = (meta.criteria ?? [])
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    const { embedding: titleVec } = await embed({ model, value: title });
+    const criterionVecs =
+      criteria.length === 0
+        ? []
+        : (await embedMany({ model, values: criteria })).embeddings;
+
+    const embedding = weightedAggregateEmbedding({ titleVec, criterionVecs });
+    const text = [title, ...criteria].join("\n\n");
+
+    return {
+      content: {
+        content: { text, metadata: args.entry.metadata ?? {} },
+        embedding,
+        searchableText: text,
+      },
+    };
+  },
+);
+```
+
+The same `content` shape can be passed from **`rag.add`** in an action if you
+are not using async ingestion. Set **`searchableText`** (and display `text`) to
+whatever you want for full-text / hybrid search—often a readable composite of
+the same parts. Hybrid search may rank slightly differently than pure vector
+search because text and vector indices are separate.
+
+**Not the same as `importance`:** the entry **`importance`** field (0–1) scales
+how strongly that entry’s stored vector matches queries in vector search; it
+does **not** change how the embedding was computed from text. Use weighted
+aggregation when you need **geometry** (what the vector represents); use
+`importance` for **retrieval ranking** of whole entries.
+
+**Operational notes:** this costs **1 + N** embedding API calls per entry (N =
+number of parts). Cache embeddings for **reused** substrings (e.g. shared
+criteria) to save cost. When any part changes, re-index the entry so the stored
+vector stays consistent.
+
+### Cache-aware content processors
+
+With **`enableEmbeddingCache: true`**, `rag.add`, `rag.addMany`, and string
+`rag.search` consult the component **embedding cache** (keyed by `modelId`,
+embedding dimension, and a hash of the text). Processors created with
+**`defineContentProcessor`** / **`defineBatchTextProcessor`** pass
+`populateEmbeddingCache` into `content.insert` automatically when caching is
+enabled.
+
+Custom handlers that **bypass** those helpers and call `content.insert`
+themselves must pass **`populateEmbeddingCache: true`** if you want inserts to
+fill the cache. You supply the final `embedding`; if you embed several strings
+per entry (title + criteria, etc.), a naive implementation re-embeds every
+string on every run—even when only one part changed.
+
+You can use the same cache from your processor: **`componentWithEmbeddingCache`**
+and **`hashText`** are exported from `"string-rag"`, along with **`getModelId`**
+for the model id string. Use the **`components.*` handle you passed into
+`new StringRAG(...)`**—on the client instance that is **`rag.component`**.
+
+Flow: hash each substring → **`lookupBatch`** → **`embedMany`** only for misses →
+**`storeBatch`** (or **`store`** per miss) → combine vectors (e.g. weighted
+aggregate) as before. The callback passed to **`defineContentProcessor`** receives
+a `ctx` with `runQuery` and `runMutation`, so you can call the cache the same way.
+
+```ts
+import { embedMany } from "ai";
+import {
+  componentWithEmbeddingCache,
+  getModelId,
+  hashText,
+} from "string-rag";
+// `rag` is your StringRAG instance; same options as add/search.
+const cache = componentWithEmbeddingCache(rag.component).embeddingCache;
+const modelId = getModelId(rag.options.textEmbeddingModel);
+const dimension = rag.options.embeddingDimension;
+
+async function embedStringsWithCache(
+  ctx,
+  texts: string[],
+): Promise<number[][]> {
+  const hashes = await Promise.all(texts.map((t) => hashText(t)));
+  const cached = await ctx.runQuery(cache.lookupBatch, {
+    modelId,
+    dimension,
+    textHashes: hashes,
+  });
+  const missIdx: number[] = [];
+  const missTexts: string[] = [];
+  for (let i = 0; i < texts.length; i++) {
+    if (cached[i] === null) {
+      missIdx.push(i);
+      missTexts.push(texts[i]);
+    }
+  }
+  let newEmbeddings: number[][] = [];
+  if (missTexts.length > 0) {
+    const { embeddings } = await embedMany({
+      model: rag.options.textEmbeddingModel,
+      values: missTexts,
+    });
+    newEmbeddings = embeddings;
+    await ctx.runMutation(cache.storeBatch, {
+      items: missIdx.map((i, k) => ({
+        modelId,
+        dimension,
+        textHash: hashes[i],
+        embedding: newEmbeddings[k],
+      })),
+    });
+  }
+  let k = 0;
+  return texts.map((_, i) =>
+    cached[i] !== null ? (cached[i] as number[]) : newEmbeddings[k++],
+  );
+}
+```
+
+Then, inside your processor, `const vecs = await embedStringsWithCache(ctx, [title, ...criteria])` and build the aggregated embedding from `vecs`. Only uncached strings incur API cost; shared criteria across gems or unchanged lines on re-index are cheap.
+
+Call **`rag.clearEmbeddingCache(ctx)`** after changing embedding models when
+caching is enabled (see client API).
 
 ## Add Entries Asynchronously using File Storage
 
@@ -613,6 +865,9 @@ This is an implementation of "Reciprocal Rank Fusion" for ranking search results
 based on multiple scoring arrays. The premise is that if both arrays of results
 are sorted by score, the best results show up near the top of both arrays and
 should be preferred over results higher in one but much lower in the other.
+
+`searchType: "hybrid"` uses this internally to combine vector and full-text hits;
+see [Hybrid and full-text search](#hybrid-and-full-text-search).
 
 ```ts
 import { hybridRank } from "string-rag";

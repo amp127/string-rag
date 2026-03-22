@@ -1,5 +1,10 @@
 import { v, type Infer } from "convex/values";
-import { action, internalQuery, type QueryCtx } from "./_generated/server.js";
+import {
+  action,
+  internalQuery,
+  query,
+  type QueryCtx,
+} from "./_generated/server.js";
 import { searchEmbeddings } from "./embeddings/index.js";
 import {
   filterFieldsFromNumbers,
@@ -16,11 +21,80 @@ import {
   type EntryId,
 } from "../shared.js";
 import type { Doc, Id } from "./_generated/dataModel.js";
-import { type vContentResult } from "./content.js";
+import type { vContentResult } from "./content.js";
 import { publicEntry } from "./helpers.js";
 import { hybridRank } from "../client/hybridRank.js";
 import { vVectorId, type VectorTableId } from "./embeddings/tables.js";
 import { getPendingEmbeddingForContent } from "./pendingEmbedding.js";
+
+type LoadedEntryEmbedding = {
+  embedding: number[];
+  namespaceId: Id<"namespaces">;
+  filterNames: string[];
+  modelId: string;
+  dimension: number;
+};
+
+async function loadEntryEmbeddingPayload(
+  ctx: QueryCtx,
+  entryId: Id<"entries">,
+): Promise<LoadedEntryEmbedding | null> {
+  const entry = await ctx.db.get(entryId);
+  if (!entry) {
+    return null;
+  }
+
+  const content = await ctx.db
+    .query("content")
+    .withIndex("entryId", (q) => q.eq("entryId", entryId))
+    .first();
+  if (!content) {
+    return null;
+  }
+
+  let embedding: number[];
+  switch (content.state.kind) {
+    case "pending": {
+      const pending = await getPendingEmbeddingForContent(ctx, content._id);
+      if (!pending) {
+        return null;
+      }
+      embedding = pending;
+      break;
+    }
+    case "ready": {
+      const vector = await ctx.db.get(content.state.embeddingId);
+      if (!vector) {
+        return null;
+      }
+      embedding = vector.vector.slice(0, -1);
+      if (embedding.length === 4095) {
+        embedding.push(0);
+      }
+      break;
+    }
+    case "replaced": {
+      embedding = content.state.vector.slice(0, -1);
+      if (embedding.length === 4095) {
+        embedding.push(0);
+      }
+      break;
+    }
+  }
+
+  const namespace = await ctx.db.get(entry.namespaceId);
+  if (!namespace) {
+    return null;
+  }
+
+  return {
+    embedding,
+    namespaceId: entry.namespaceId,
+    filterNames: namespace.filterNames,
+    modelId: namespace.modelId,
+    dimension: namespace.dimension,
+  };
+}
 
 const vEntryEmbeddingPayload = v.object({
   embedding: v.array(v.number()),
@@ -346,66 +420,47 @@ export const getEntryEmbedding = internalQuery({
   },
   returns: v.union(v.null(), vEntryEmbeddingPayload),
   handler: async (ctx, args) => {
-    const entry = await ctx.db.get(args.entryId);
-    if (!entry) {
+    const loaded = await loadEntryEmbeddingPayload(ctx, args.entryId);
+    if (!loaded) {
       return null;
     }
-
-    const content = await ctx.db
-      .query("content")
-      .withIndex("entryId", (q) => q.eq("entryId", args.entryId))
-      .first();
-    if (!content) {
-      return null;
-    }
-
-    let embedding: number[];
-    switch (content.state.kind) {
-      case "pending": {
-        const pending = await getPendingEmbeddingForContent(
-          ctx,
-          content._id,
-        );
-        if (!pending) {
-          return null;
-        }
-        embedding = pending;
-        break;
-      }
-      case "ready": {
-        const vector = await ctx.db.get(content.state.embeddingId);
-        if (!vector) {
-          return null;
-        }
-        // Strip the importance weight dimension appended by vectorWithImportance
-        embedding = vector.vector.slice(0, -1);
-        // 4096-dim embeddings were truncated to 4095 to fit the importance
-        // weight within the 4096 limit; pad back so searchEmbeddings resolves
-        // the correct vector table.
-        if (embedding.length === 4095) {
-          embedding.push(0);
-        }
-        break;
-      }
-      case "replaced": {
-        embedding = content.state.vector.slice(0, -1);
-        if (embedding.length === 4095) {
-          embedding.push(0);
-        }
-        break;
-      }
-    }
-
-    const namespace = await ctx.db.get(entry.namespaceId);
-    if (!namespace) {
-      return null;
-    }
-
     return {
-      embedding,
-      namespaceId: entry.namespaceId,
-      filterNames: namespace.filterNames,
+      embedding: loaded.embedding,
+      namespaceId: loaded.namespaceId,
+      filterNames: loaded.filterNames,
     };
+  },
+});
+
+/**
+ * Returns the stored embedding vector for an entry when its namespace matches
+ * the given model id and embedding dimension (same as the StringRAG instance
+ * used to add the entry).
+ */
+export const embeddingForEntry = query({
+  args: {
+    entryId: v.id("entries"),
+    modelId: v.string(),
+    dimension: v.number(),
+  },
+  returns: v.union(
+    v.null(),
+    v.object({
+      embedding: v.array(v.number()),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    const loaded = await loadEntryEmbeddingPayload(ctx, args.entryId);
+    if (!loaded) {
+      return null;
+    }
+    if (
+      loaded.modelId !== args.modelId ||
+      loaded.dimension !== args.dimension
+    ) {
+      return null;
+    }
+    return { embedding: loaded.embedding };
   },
 });
 

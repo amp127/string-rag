@@ -22,10 +22,14 @@ import {
   deletePendingEmbeddingForContent,
   insertPendingEmbedding,
 } from "./pendingEmbedding.js";
+import { upsertEmbeddingCacheEntry } from "./embeddingCache.js";
+import { hashText } from "../client/fileUtils.js";
 
 export const vInsertContentArgs = v.object({
   entryId: v.id("entries"),
   content: vCreateContentArgs,
+  /** When true, upsert into `embeddingCache` (used when `enableEmbeddingCache` is on). */
+  populateEmbeddingCache: v.optional(v.boolean()),
 });
 type InsertContentArgs = Infer<typeof vInsertContentArgs>;
 
@@ -37,7 +41,7 @@ export const insert = mutation({
 
 export async function insertContent(
   ctx: MutationCtx,
-  { entryId, content }: InsertContentArgs,
+  { entryId, content, populateEmbeddingCache }: InsertContentArgs,
 ) {
   const entry = await ctx.db.get(entryId);
   if (!entry) {
@@ -102,6 +106,16 @@ export async function insertContent(
       ...filterFieldsFromNumbers(entry.namespaceId, numberedFilter),
     });
     await insertPendingEmbedding(ctx, contentId, content.embedding);
+  }
+
+  if (populateEmbeddingCache === true) {
+    const textHash = await hashText(content.content.text);
+    await upsertEmbeddingCacheEntry(ctx, {
+      modelId: namespace.modelId,
+      dimension: namespace.dimension,
+      textHash,
+      embedding: content.embedding,
+    });
   }
 
   return { status: previousEntry ? ("pending" as const) : ("ready" as const) };

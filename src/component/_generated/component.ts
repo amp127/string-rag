@@ -34,6 +34,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             searchableText?: string;
           };
           entryId: string;
+          populateEmbeddingCache?: boolean;
         },
         { status: "pending" | "ready" | "replaced" },
         Name
@@ -66,6 +67,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             title?: string;
           };
           onComplete?: string;
+          populateEmbeddingCache?: boolean;
         },
         {
           created: boolean;
@@ -114,6 +116,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             onComplete?: string;
           }>;
           namespaceId: string;
+          populateEmbeddingCache?: boolean;
         },
         {
           created: Array<boolean>;
@@ -491,6 +494,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       >;
     };
     search: {
+      embeddingForEntry: FunctionReference<
+        "query",
+        "internal",
+        { dimension: number; entryId: string; modelId: string },
+        null | { embedding: Array<number> },
+        Name
+      >;
       search: FunctionReference<
         "action",
         "internal",

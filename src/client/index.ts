@@ -25,6 +25,7 @@ import {
 } from "convex/server";
 import { type Value } from "convex/values";
 import { ComponentApi } from "../component/_generated/component.js";
+import { hashText } from "./fileUtils.js";
 import type { NamedFilter } from "../component/filters.js";
 import {
   filterNamesContain,
@@ -80,6 +81,7 @@ export {
   contentHashFromArrayBuffer,
   guessMimeTypeFromContents,
   guessMimeTypeFromExtension,
+  hashText,
 } from "./fileUtils.js";
 
 const DEFAULT_SEARCH_LIMIT = 10;
@@ -181,6 +183,13 @@ export class StringRAG<
       textEmbeddingModel: EmbeddingModel;
       /** Ordered list of filter names for this RAG. Order is fixed per namespace (see docs/filters.md). */
       filterNames?: FilterNames<FitlerSchemas>;
+      /**
+       * When `true`, embeddings for identical text are reused across namespaces
+       * that share the same model and dimension (persistent DB cache). Skips
+       * redundant embedding API calls for `add`, `addMany`, and string `search`
+       * queries. Default `false` (opt-in).
+       */
+      enableEmbeddingCache?: boolean;
     },
   ) {}
 
@@ -194,7 +203,7 @@ export class StringRAG<
    * The filterValues you provide can be used later to search for it.
    */
   async add(
-    ctx: CtxWith<"runMutation">,
+    ctx: CtxWith<"runMutation" | "runQuery">,
     args: NamespaceSelection &
       EntryArgs<FitlerSchemas, EntryMetadata> &
       (
@@ -233,6 +242,32 @@ export class StringRAG<
     const totalUsage: EmbeddingModelUsage = { tokens: 0 };
     if (args.content) {
       contentArg = args.content;
+    } else if (this.options.enableEmbeddingCache === true) {
+      const modelId = getModelId(this.options.textEmbeddingModel);
+      const dimension = this.options.embeddingDimension;
+      const textHash = await hashText(args.text);
+      const cached = await ctx.runQuery(
+        componentWithEmbeddingCache(this.component).embeddingCache.lookup,
+        { modelId, dimension, textHash },
+      );
+      if (cached) {
+        contentArg = {
+          content: { text: args.text },
+          embedding: cached,
+          searchableText: args.text,
+        };
+      } else {
+        const embedResult = await embedSafe({
+          model: this.options.textEmbeddingModel,
+          value: args.text,
+        });
+        totalUsage.tokens += embedResult.usage?.tokens ?? 0;
+        contentArg = {
+          content: { text: args.text },
+          embedding: embedResult.embedding,
+          searchableText: args.text,
+        };
+      }
     } else {
       const embedResult = await embedSafe({
         model: this.options.textEmbeddingModel,
@@ -263,6 +298,7 @@ export class StringRAG<
         },
         onComplete,
         content: contentArg,
+        populateEmbeddingCache: this.options.enableEmbeddingCache === true,
       },
     );
     if (status === "ready") {
@@ -316,7 +352,7 @@ export class StringRAG<
    * `content`. Optional `onComplete` per item is supported.
    */
   async addMany(
-    ctx: CtxWith<"runMutation">,
+    ctx: CtxWith<"runMutation" | "runQuery">,
     args: (NamespaceSelection & { maxBatchSize?: number }) & {
       items: Array<
         EntryArgs<FitlerSchemas, EntryMetadata> &
@@ -365,22 +401,108 @@ export class StringRAG<
       validateAddFilterValues(item.filterValues, this.options.filterNames);
     }
 
-    const textsToEmbed = args.items
-      .map((item) => ("text" in item && item.text !== undefined ? item.text : null))
-      .filter((t): t is string => t !== null);
-    let embedResult: { embeddings: number[][]; usage?: EmbeddingModelUsage } = {
-      embeddings: [],
-      usage: { tokens: 0 },
-    };
-    if (textsToEmbed.length > 0) {
-      embedResult = await embedManySafe({
-        model: this.options.textEmbeddingModel,
-        values: textsToEmbed,
+    let contentArgs: (CreateContentArgs | undefined)[];
+    let totalUsage: EmbeddingModelUsage;
+
+    if (this.options.enableEmbeddingCache === true) {
+      type TextSlot = { itemIndex: number; text: string };
+      const textSlots: TextSlot[] = [];
+      for (let i = 0; i < args.items.length; i++) {
+        const item = args.items[i];
+        if (item.content) continue;
+        if ("text" in item && item.text !== undefined) {
+          textSlots.push({ itemIndex: i, text: item.text });
+        }
+      }
+
+      const modelId = getModelId(this.options.textEmbeddingModel);
+      const dimension = this.options.embeddingDimension;
+      const textHashes =
+        textSlots.length > 0
+          ? await Promise.all(textSlots.map((s) => hashText(s.text)))
+          : [];
+      const cachedList =
+        textHashes.length > 0
+          ? await ctx.runQuery(
+              componentWithEmbeddingCache(this.component).embeddingCache
+                .lookupBatch,
+              { modelId, dimension, textHashes },
+            )
+          : [];
+
+      const missTexts: string[] = [];
+      const missSlotIndices: number[] = [];
+      for (let j = 0; j < textSlots.length; j++) {
+        if (cachedList[j] === null) {
+          missTexts.push(textSlots[j].text);
+          missSlotIndices.push(j);
+        }
+      }
+
+      let embedResult: { embeddings: number[][]; usage?: EmbeddingModelUsage } =
+        {
+          embeddings: [],
+          usage: { tokens: 0 },
+        };
+      if (missTexts.length > 0) {
+        embedResult = await embedManySafe({
+          model: this.options.textEmbeddingModel,
+          values: missTexts,
+        });
+      }
+
+      const resolvedBySlot: number[][] = new Array(textSlots.length);
+      for (let j = 0; j < textSlots.length; j++) {
+        const c = cachedList[j];
+        if (c !== null) {
+          resolvedBySlot[j] = c;
+        }
+      }
+      for (let k = 0; k < missSlotIndices.length; k++) {
+        const j = missSlotIndices[k];
+        const embedding = embedResult.embeddings[k];
+        if (!embedding) {
+          throw new Error("embedMany returned fewer embeddings than texts");
+        }
+        resolvedBySlot[j] = embedding;
+      }
+
+      let slotCursor = 0;
+      contentArgs = args.items.map((item) => {
+        if (item.content) return item.content;
+        if ("text" in item && item.text !== undefined) {
+          const embedding = resolvedBySlot[slotCursor++];
+          return {
+            content: { text: item.text },
+            embedding,
+            searchableText: item.text,
+          };
+        }
+        return undefined;
       });
-    }
-    let embedIndex = 0;
-    const contentArgs: (CreateContentArgs | undefined)[] = args.items.map(
-      (item) => {
+
+      totalUsage = {
+        tokens: embedResult.usage?.tokens ?? 0,
+      };
+    } else {
+      const textsToEmbed = args.items
+        .map((item) =>
+          "text" in item && item.text !== undefined ? item.text : null,
+        )
+        .filter((t): t is string => t !== null);
+      let embedResult: { embeddings: number[][]; usage?: EmbeddingModelUsage } =
+        {
+          embeddings: [],
+          usage: { tokens: 0 },
+        };
+      if (textsToEmbed.length > 0) {
+        embedResult = await embedManySafe({
+          model: this.options.textEmbeddingModel,
+          values: textsToEmbed,
+        });
+      }
+      let embedIndex = 0;
+      contentArgs = args.items.map((item) => {
         if (item.content) return item.content;
         if ("text" in item && item.text !== undefined) {
           const embedding = embedResult.embeddings[embedIndex];
@@ -395,8 +517,9 @@ export class StringRAG<
           };
         }
         return undefined;
-      },
-    );
+      });
+      totalUsage = { tokens: embedResult.usage?.tokens ?? 0 };
+    }
 
     const onCompleteHandles = await Promise.all(
       args.items.map((item) =>
@@ -424,6 +547,7 @@ export class StringRAG<
     const rawResult = (await ctx.runMutation(addManyRef.addMany, {
       namespaceId: namespaceId as unknown as string,
       items: itemsForMutation,
+      populateEmbeddingCache: this.options.enableEmbeddingCache === true,
     })) as {
       entryIds: string[];
       statuses: Status[];
@@ -438,7 +562,7 @@ export class StringRAG<
         FitlerSchemas,
         EntryMetadata
       > | null)[],
-      usage: { tokens: embedResult.usage?.tokens ?? 0 },
+      usage: totalUsage,
     };
   }
 
@@ -704,7 +828,7 @@ export class StringRAG<
    * parameters to filter and constrain the results.
    */
   async search(
-    ctx: CtxWith<"runAction">,
+    ctx: CtxWith<"runAction" | "runQuery" | "runMutation">,
     args: {
       /**
        * The namespace to search in. e.g. a userId if entries are per-user.
@@ -751,6 +875,33 @@ export class StringRAG<
     if (needsEmbedding) {
       if (Array.isArray(args.query)) {
         embedding = args.query;
+      } else if (this.options.enableEmbeddingCache === true) {
+        const modelId = getModelId(this.options.textEmbeddingModel);
+        const dimension = this.options.embeddingDimension;
+        const textHash = await hashText(args.query);
+        const cached = await ctx.runQuery(
+          componentWithEmbeddingCache(this.component).embeddingCache.lookup,
+          { modelId, dimension, textHash },
+        );
+        if (cached) {
+          embedding = cached;
+        } else {
+          const embedResult = await embedSafe({
+            model: this.options.textEmbeddingModel,
+            value: args.query,
+          });
+          embedding = embedResult.embedding;
+          usage = embedResult.usage ?? { tokens: 0 };
+          await ctx.runMutation(
+            componentWithEmbeddingCache(this.component).embeddingCache.store,
+            {
+              modelId,
+              dimension,
+              textHash,
+              embedding,
+            },
+          );
+        }
       } else {
         const embedResult = await embedSafe({
           model: this.options.textEmbeddingModel,
@@ -923,7 +1074,7 @@ export class StringRAG<
    * extra context / conversation history.
    */
   async generateText(
-    ctx: CtxWith<"runAction">,
+    ctx: CtxWith<"runAction" | "runQuery" | "runMutation">,
     args: {
       /**
        * The search options to use for context search, including the namespace.
@@ -1087,6 +1238,26 @@ export class StringRAG<
   }
 
   /**
+   * Returns the stored embedding for an entry when its namespace matches the
+   * given model id and embedding dimension. Omit `modelId` and `dimension` to
+   * use this StringRAG instance's configured embedding model and dimension.
+   */
+  async getEmbeddingForEntry(
+    ctx: CtxWith<"runQuery">,
+    args: {
+      entryId: EntryId;
+      modelId?: string;
+      dimension?: number;
+    },
+  ): Promise<{ embedding: number[] } | null> {
+    return await ctx.runQuery(this.component.search.embeddingForEntry, {
+      entryId: args.entryId,
+      modelId: args.modelId ?? getModelId(this.options.textEmbeddingModel),
+      dimension: args.dimension ?? this.options.embeddingDimension,
+    });
+  }
+
+  /**
    * Get multiple entries by id in one query. Reduces round-trips when
    * loading many entries. Returns null for missing entry ids.
    */
@@ -1128,6 +1299,30 @@ export class StringRAG<
       contentHash: args.contentHash,
     });
     return entry as Entry<FitlerSchemas, EntryMetadata> | null;
+  }
+
+  /**
+   * Delete embedding cache rows. With no arguments, clears the entire cache.
+   * Pass `modelId` and/or `dimension` to narrow the deletion (e.g. after a
+   * provider updates an embedding model).
+   *
+   * No-ops (returns `0`) when `enableEmbeddingCache` was not set to `true`
+   * on this `StringRAG` instance.
+   */
+  async clearEmbeddingCache(
+    ctx: CtxWith<"runMutation">,
+    args?: { modelId?: string; dimension?: number },
+  ): Promise<number> {
+    if (this.options.enableEmbeddingCache !== true) {
+      return 0;
+    }
+    return ctx.runMutation(
+      componentWithEmbeddingCache(this.component).embeddingCache.clear,
+      {
+        modelId: args?.modelId,
+        dimension: args?.dimension,
+      },
+    );
   }
 
   /**
@@ -1412,6 +1607,7 @@ export class StringRAG<
           {
             entryId: entry.entryId,
             content,
+            populateEmbeddingCache: this.options.enableEmbeddingCache === true,
           },
         );
       },
@@ -1491,6 +1687,7 @@ export class StringRAG<
             {
               entryId: entry.entryId,
               content: output.content,
+              populateEmbeddingCache: this.options.enableEmbeddingCache === true,
             },
           );
         }
@@ -1498,9 +1695,6 @@ export class StringRAG<
     });
   }
 }
-
-/** @deprecated Use StringRAG instead. */
-export { StringRAG as RAG };
 
 function validateAddFilterValues(
   filterValues: NamedFilter[] | undefined,
@@ -1717,6 +1911,62 @@ export function getProviderName(embeddingModel: ModelOrMetadata): string {
     return part ?? embeddingModel;
   }
   return embeddingModel.provider;
+}
+
+/** Internal refs for the component embedding cache (for custom processors, etc.). */
+export type EmbeddingCacheApi = {
+  lookup: FunctionReference<
+    "query",
+    "internal",
+    { dimension: number; modelId: string; textHash: string },
+    null | number[]
+  >;
+  lookupBatch: FunctionReference<
+    "query",
+    "internal",
+    { dimension: number; modelId: string; textHashes: string[] },
+    (null | number[])[]
+  >;
+  store: FunctionReference<
+    "mutation",
+    "internal",
+    {
+      dimension: number;
+      embedding: number[];
+      modelId: string;
+      textHash: string;
+    },
+    null
+  >;
+  storeBatch: FunctionReference<
+    "mutation",
+    "internal",
+    {
+      items: Array<{
+        dimension: number;
+        embedding: number[];
+        modelId: string;
+        textHash: string;
+      }>;
+    },
+    null
+  >;
+  clear: FunctionReference<
+    "mutation",
+    "internal",
+    { dimension?: number; modelId?: string },
+    number
+  >;
+};
+
+/**
+ * Narrows your app’s `components.<rag>` handle so `embeddingCache` internal
+ * queries/mutations are typed (codegen may omit them from `ComponentApi`).
+ */
+export function componentWithEmbeddingCache(
+  component: ComponentApi,
+): ComponentApi & { embeddingCache: EmbeddingCacheApi } {
+  return component as ComponentApi & { embeddingCache: EmbeddingCacheApi };
 }
 
 type CtxWith<T extends "runQuery" | "runMutation" | "runAction"> = Pick<
