@@ -24,6 +24,53 @@ import type { FunctionReference } from "convex/server";
 export type ComponentApi<Name extends string | undefined = string | undefined> =
   {
     content: {
+      embeddingCacheClear: FunctionReference<
+        "mutation",
+        "internal",
+        { dimension?: number; modelId?: string },
+        number,
+        Name
+      >;
+      embeddingCacheLookup: FunctionReference<
+        "query",
+        "internal",
+        { dimension: number; modelId: string; textHash: string },
+        null | Array<number>,
+        Name
+      >;
+      embeddingCacheLookupBatch: FunctionReference<
+        "query",
+        "internal",
+        { dimension: number; modelId: string; textHashes: Array<string> },
+        Array<null | Array<number>>,
+        Name
+      >;
+      embeddingCacheStore: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          dimension: number;
+          embedding: Array<number>;
+          modelId: string;
+          textHash: string;
+        },
+        null,
+        Name
+      >;
+      embeddingCacheStoreBatch: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          items: Array<{
+            dimension: number;
+            embedding: Array<number>;
+            modelId: string;
+            textHash: string;
+          }>;
+        },
+        null,
+        Name
+      >;
       insert: FunctionReference<
         "mutation",
         "internal",

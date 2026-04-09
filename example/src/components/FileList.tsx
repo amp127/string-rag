@@ -1,5 +1,5 @@
 import { useCallback, useEffect } from "react";
-import { useConvex } from "convex/react";
+import { useConvex, useQuery } from "convex/react";
 import { usePaginatedQuery } from "convex-helpers/react";
 import { api } from "../../convex/_generated/api";
 import type { PublicFile } from "../../convex/example";

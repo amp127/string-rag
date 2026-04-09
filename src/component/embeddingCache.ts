@@ -3,6 +3,7 @@ import {
   internalMutation,
   internalQuery,
   type MutationCtx,
+  type QueryCtx,
 } from "./_generated/server.js";
 
 export async function upsertEmbeddingCacheEntry(
@@ -49,6 +50,101 @@ export async function upsertEmbeddingCacheBatch(
   }
 }
 
+export async function lookupEmbeddingCacheImpl(
+  ctx: QueryCtx,
+  args: { modelId: string; dimension: number; textHash: string },
+): Promise<number[] | null> {
+  const doc = await ctx.db
+    .query("embeddingCache")
+    .withIndex("by_modelId_dimension_hash", (q) =>
+      q
+        .eq("modelId", args.modelId)
+        .eq("dimension", args.dimension)
+        .eq("textHash", args.textHash),
+    )
+    .first();
+  return doc?.embedding ?? null;
+}
+
+export async function lookupEmbeddingCacheBatchImpl(
+  ctx: QueryCtx,
+  args: { modelId: string; dimension: number; textHashes: string[] },
+): Promise<Array<number[] | null>> {
+  return Promise.all(
+    args.textHashes.map(async (textHash) =>
+      lookupEmbeddingCacheImpl(ctx, {
+        modelId: args.modelId,
+        dimension: args.dimension,
+        textHash,
+      }),
+    ),
+  );
+}
+
+export async function clearEmbeddingCacheImpl(
+  ctx: MutationCtx,
+  args: { modelId?: string; dimension?: number },
+): Promise<number> {
+  let deleted = 0;
+
+  if (args.modelId !== undefined && args.dimension !== undefined) {
+    while (true) {
+      const batch = await ctx.db
+        .query("embeddingCache")
+        .withIndex("by_modelId_dimension_hash", (q) =>
+          q.eq("modelId", args.modelId!).eq("dimension", args.dimension!),
+        )
+        .take(128);
+      if (batch.length === 0) break;
+      for (const doc of batch) {
+        await ctx.db.delete(doc._id);
+        deleted++;
+      }
+    }
+    return deleted;
+  }
+
+  if (args.modelId !== undefined) {
+    while (true) {
+      const batch = await ctx.db
+        .query("embeddingCache")
+        .withIndex("by_modelId_dimension_hash", (q) => q.eq("modelId", args.modelId!))
+        .take(128);
+      if (batch.length === 0) break;
+      for (const doc of batch) {
+        await ctx.db.delete(doc._id);
+        deleted++;
+      }
+    }
+    return deleted;
+  }
+
+  if (args.dimension !== undefined) {
+    while (true) {
+      const batch = await ctx.db
+        .query("embeddingCache")
+        .withIndex("by_dimension", (q) => q.eq("dimension", args.dimension!))
+        .take(128);
+      if (batch.length === 0) break;
+      for (const doc of batch) {
+        await ctx.db.delete(doc._id);
+        deleted++;
+      }
+    }
+    return deleted;
+  }
+
+  while (true) {
+    const batch = await ctx.db.query("embeddingCache").take(128);
+    if (batch.length === 0) break;
+    for (const doc of batch) {
+      await ctx.db.delete(doc._id);
+      deleted++;
+    }
+  }
+  return deleted;
+}
+
 export const lookup = internalQuery({
   args: {
     modelId: v.string(),
@@ -56,18 +152,7 @@ export const lookup = internalQuery({
     textHash: v.string(),
   },
   returns: v.union(v.null(), v.array(v.number())),
-  handler: async (ctx, args) => {
-    const doc = await ctx.db
-      .query("embeddingCache")
-      .withIndex("by_modelId_dimension_hash", (q) =>
-        q
-          .eq("modelId", args.modelId)
-          .eq("dimension", args.dimension)
-          .eq("textHash", args.textHash),
-      )
-      .first();
-    return doc?.embedding ?? null;
-  },
+  handler: async (ctx, args) => lookupEmbeddingCacheImpl(ctx, args),
 });
 
 export const lookupBatch = internalQuery({
@@ -77,22 +162,7 @@ export const lookupBatch = internalQuery({
     textHashes: v.array(v.string()),
   },
   returns: v.array(v.union(v.null(), v.array(v.number()))),
-  handler: async (ctx, args) => {
-    return Promise.all(
-      args.textHashes.map(async (textHash) => {
-        const doc = await ctx.db
-          .query("embeddingCache")
-          .withIndex("by_modelId_dimension_hash", (q) =>
-            q
-              .eq("modelId", args.modelId)
-              .eq("dimension", args.dimension)
-              .eq("textHash", textHash),
-          )
-          .first();
-        return doc?.embedding ?? null;
-      }),
-    );
-  },
+  handler: async (ctx, args) => lookupEmbeddingCacheBatchImpl(ctx, args),
 });
 
 export const store = internalMutation({
@@ -109,7 +179,7 @@ export const store = internalMutation({
   },
 });
 
-const vCacheItem = v.object({
+export const vEmbeddingCacheItem = v.object({
   modelId: v.string(),
   dimension: v.number(),
   textHash: v.string(),
@@ -118,7 +188,7 @@ const vCacheItem = v.object({
 
 export const storeBatch = internalMutation({
   args: {
-    items: v.array(vCacheItem),
+    items: v.array(vEmbeddingCacheItem),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -133,64 +203,5 @@ export const clear = internalMutation({
     dimension: v.optional(v.number()),
   },
   returns: v.number(),
-  handler: async (ctx, args) => {
-    let deleted = 0;
-
-    if (args.modelId !== undefined && args.dimension !== undefined) {
-      while (true) {
-        const batch = await ctx.db
-          .query("embeddingCache")
-          .withIndex("by_modelId_dimension_hash", (q) =>
-            q.eq("modelId", args.modelId!).eq("dimension", args.dimension!),
-          )
-          .take(128);
-        if (batch.length === 0) break;
-        for (const doc of batch) {
-          await ctx.db.delete(doc._id);
-          deleted++;
-        }
-      }
-      return deleted;
-    }
-
-    if (args.modelId !== undefined) {
-      while (true) {
-        const batch = await ctx.db
-          .query("embeddingCache")
-          .withIndex("by_modelId_dimension_hash", (q) => q.eq("modelId", args.modelId!))
-          .take(128);
-        if (batch.length === 0) break;
-        for (const doc of batch) {
-          await ctx.db.delete(doc._id);
-          deleted++;
-        }
-      }
-      return deleted;
-    }
-
-    if (args.dimension !== undefined) {
-      while (true) {
-        const batch = await ctx.db
-          .query("embeddingCache")
-          .withIndex("by_dimension", (q) => q.eq("dimension", args.dimension!))
-          .take(128);
-        if (batch.length === 0) break;
-        for (const doc of batch) {
-          await ctx.db.delete(doc._id);
-          deleted++;
-        }
-      }
-      return deleted;
-    }
-
-    while (true) {
-      const batch = await ctx.db.query("embeddingCache").take(128);
-      if (batch.length === 0) break;
-      for (const doc of batch) {
-        await ctx.db.delete(doc._id);
-        deleted++;
-      }
-    }
-    return deleted;
-  },
+  handler: async (ctx, args) => clearEmbeddingCacheImpl(ctx, args),
 });

@@ -1,6 +1,9 @@
 import { describe, expect, test } from "vitest";
+import type { TestConvex } from "convex-test";
 import { StringRAG, type EntryId } from "./index.js";
 import type { DataModelFromSchemaDefinition } from "convex/server";
+import type { EmbeddingModelUsage } from "ai";
+import type { Status } from "../shared.js";
 import {
   anyApi,
   queryGeneric,
@@ -81,10 +84,18 @@ export const add = mutation({
     contentHash: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    if (args.content) {
-      return rag.add(ctx, { ...args, content: args.content });
+    const base = {
+      namespace: args.namespace,
+      key: args.key,
+      title: args.title,
+      filterValues: args.filterValues,
+      importance: args.importance,
+      contentHash: args.contentHash,
+    };
+    if (args.content !== undefined) {
+      return rag.add(ctx, { ...base, content: args.content });
     }
-    return rag.add(ctx, { ...args, text: args.text ?? "" });
+    return rag.add(ctx, { ...base, text: args.text ?? "" });
   },
 });
 
@@ -289,8 +300,17 @@ function dummyEmbeddings(text: string) {
   );
 }
 
+/** Return shape of `rag.add` / the test `add` mutation (mirrors StringRAG.add). */
+type AddMutationResult = {
+  entryId: EntryId;
+  status: Status;
+  created: boolean;
+  replacedEntry: unknown;
+  usage: EmbeddingModelUsage;
+};
+
 function addWithDummyContent(
-  t: { mutation: (fn: unknown, args: unknown) => Promise<unknown> },
+  t: TestConvex<typeof schema>,
   args: {
     key: string;
     text: string;
@@ -298,7 +318,7 @@ function addWithDummyContent(
     title?: string;
     contentHash?: string;
   },
-) {
+): Promise<AddMutationResult> {
   const { key, text, namespace, title, contentHash } = args;
   return t.mutation(testApi.add, {
     key,
@@ -310,7 +330,7 @@ function addWithDummyContent(
       embedding: dummyEmbeddings(text),
       searchableText: text,
     },
-  });
+  }) as Promise<AddMutationResult>;
 }
 
 describe("StringRAG thick client", () => {

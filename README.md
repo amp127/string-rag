@@ -596,7 +596,7 @@ async function embedStringsWithCache(
 }
 ```
 
-Then, inside your processor, `const vecs = await embedStringsWithCache(ctx, [title, ...criteria])` and build the aggregated embedding from `vecs`. Only uncached strings incur API cost; shared criteria across gems or unchanged lines on re-index are cheap.
+Then, inside your processor, `const vecs = await embedStringsWithCache(ctx, [title, ...criteria])` and build the aggregated embedding from `vecs`. Only uncached strings incur API cost; shared criteria across titles or unchanged lines on re-index are cheap.
 
 Call **`rag.clearEmbeddingCache(ctx)`** after changing embedding models when
 caching is enabled (see client API).

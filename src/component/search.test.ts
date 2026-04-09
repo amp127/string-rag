@@ -603,12 +603,9 @@ describe("search", () => {
         textQuery: "quantum computing",
       });
 
-      // Each result should appear at most once.
-      const entryOrderPairs = result.results.map(
-        (r) => `${r.entryId}:${r.order}`,
-      );
-      const uniquePairs = new Set(entryOrderPairs);
-      expect(uniquePairs.size).toBe(entryOrderPairs.length);
+      // Each entry should appear at most once in the merged result list.
+      const entryIds = result.results.map((r) => r.entryId);
+      expect(new Set(entryIds).size).toBe(entryIds.length);
     });
 
     test("vector-only search is unchanged when textQuery is not provided", async () => {

@@ -527,30 +527,21 @@ function Example() {
                           </div>
 
                           <div className="space-y-3">
-                            {result.content.map((content, contentIndex) => {
-                              const isHighlighted =
-                                contentIndex + result.startOrder ===
-                                result.order;
-
-                              return (
-                                <div
-                                  key={contentIndex}
-                                  className={`p-4 rounded-xl border transition-all duration-200 ${
-                                    isHighlighted
-                                      ? "border-yellow-300 bg-gradient-to-r from-yellow-50 to-amber-50 shadow-md"
-                                      : "border-gray-200 bg-gray-50/80"
-                                  }`}
-                                >
-                                  <div className="flex items-start justify-between">
-                                    <div className="flex-1">
-                                      <div className="w-full text-sm leading-relaxed text-gray-900 font-medium whitespace-pre-wrap">
-                                        {content.text}
-                                      </div>
-                                    </div>
+                            <div
+                              className={`p-4 rounded-xl border transition-all duration-200 ${
+                                index === 0
+                                  ? "border-yellow-300 bg-gradient-to-r from-yellow-50 to-amber-50 shadow-md"
+                                  : "border-gray-200 bg-gray-50/80"
+                              }`}
+                            >
+                              <div className="flex items-start justify-between">
+                                <div className="flex-1">
+                                  <div className="w-full text-sm leading-relaxed text-gray-900 font-medium whitespace-pre-wrap">
+                                    {result.content.text}
                                   </div>
                                 </div>
-                              );
-                            })}
+                              </div>
+                            </div>
                           </div>
                         </div>
                       </div>

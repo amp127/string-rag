@@ -1960,13 +1960,24 @@ export type EmbeddingCacheApi = {
 };
 
 /**
- * Narrows your app’s `components.<rag>` handle so `embeddingCache` internal
- * queries/mutations are typed (codegen may omit them from `ComponentApi`).
+ * Returns a component handle with `embeddingCache.*` function refs wired to
+ * `content.embeddingCacheLookup` / `store` / … (the standalone `embeddingCache`
+ * module is not on the component bridge; these use `query`/`mutation` in
+ * `content.ts`).
  */
 export function componentWithEmbeddingCache(
   component: ComponentApi,
 ): ComponentApi & { embeddingCache: EmbeddingCacheApi } {
-  return component as ComponentApi & { embeddingCache: EmbeddingCacheApi };
+  return {
+    ...component,
+    embeddingCache: {
+      lookup: component.content.embeddingCacheLookup,
+      lookupBatch: component.content.embeddingCacheLookupBatch,
+      store: component.content.embeddingCacheStore,
+      storeBatch: component.content.embeddingCacheStoreBatch,
+      clear: component.content.embeddingCacheClear,
+    },
+  };
 }
 
 type CtxWith<T extends "runQuery" | "runMutation" | "runAction"> = Pick<

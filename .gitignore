@@ -9,6 +9,7 @@ dist-ssr
 explorations
 node_modules
 .eslintcache
+.specstory
 
 # npm pack output
 *.tgz

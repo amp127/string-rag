@@ -7,6 +7,7 @@ import {
   internalMutation,
   internalQuery,
   mutation,
+  query,
   type MutationCtx,
   type QueryCtx,
 } from "./_generated/server.js";
@@ -22,7 +23,14 @@ import {
   deletePendingEmbeddingForContent,
   insertPendingEmbedding,
 } from "./pendingEmbedding.js";
-import { upsertEmbeddingCacheEntry } from "./embeddingCache.js";
+import {
+  clearEmbeddingCacheImpl,
+  lookupEmbeddingCacheBatchImpl,
+  lookupEmbeddingCacheImpl,
+  upsertEmbeddingCacheBatch,
+  upsertEmbeddingCacheEntry,
+  vEmbeddingCacheItem,
+} from "./embeddingCache.js";
 import { hashText } from "../client/fileUtils.js";
 
 export const vInsertContentArgs = v.object({
@@ -329,3 +337,62 @@ export async function deleteContentHandler(
   await ctx.db.delete(contentDoc._id);
   return { isDone: true };
 }
+
+/**
+ * Parent apps call these via `components.<rag>.content.embeddingCache*`.
+ * They use `query` / `mutation` (not `internal*`) so they are on the component
+ * bridge; the `embeddingCache` internal module is not exposed that way.
+ */
+export const embeddingCacheLookup = query({
+  args: {
+    modelId: v.string(),
+    dimension: v.number(),
+    textHash: v.string(),
+  },
+  returns: v.union(v.null(), v.array(v.number())),
+  handler: async (ctx, args) => lookupEmbeddingCacheImpl(ctx, args),
+});
+
+export const embeddingCacheLookupBatch = query({
+  args: {
+    modelId: v.string(),
+    dimension: v.number(),
+    textHashes: v.array(v.string()),
+  },
+  returns: v.array(v.union(v.null(), v.array(v.number()))),
+  handler: async (ctx, args) => lookupEmbeddingCacheBatchImpl(ctx, args),
+});
+
+export const embeddingCacheStore = mutation({
+  args: {
+    modelId: v.string(),
+    dimension: v.number(),
+    textHash: v.string(),
+    embedding: v.array(v.number()),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    await upsertEmbeddingCacheEntry(ctx, args);
+    return null;
+  },
+});
+
+export const embeddingCacheStoreBatch = mutation({
+  args: {
+    items: v.array(vEmbeddingCacheItem),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    await upsertEmbeddingCacheBatch(ctx, args.items);
+    return null;
+  },
+});
+
+export const embeddingCacheClear = mutation({
+  args: {
+    modelId: v.optional(v.string()),
+    dimension: v.optional(v.number()),
+  },
+  returns: v.number(),
+  handler: async (ctx, args) => clearEmbeddingCacheImpl(ctx, args),
+});

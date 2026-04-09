@@ -716,3 +716,4 @@ function publicSearchResult(
     score,
   };
 }
+

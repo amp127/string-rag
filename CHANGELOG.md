@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.1.12
+
+- **Fix (`enableEmbeddingCache`):** Embedding cache calls from the client no
+  longer fail at runtime with unresolved `string_rag.embeddingCache.*` (or
+  equivalent) paths.
+- **Cause:** `componentWithEmbeddingCache` was only a TypeScript assertion and
+  did not attach an `embeddingCache` object at runtime. Also, only functions
+  registered with `query` / `mutation` are on the component bridge for parent
+  apps; the `embeddingCache` module uses `internalQuery` / `internalMutation`
+  and was never exposed as `components.<rag>.embeddingCache.*`.
+- **Change:** Bridge endpoints on **`content`** — `embeddingCacheLookup`,
+  `embeddingCacheLookupBatch`, `embeddingCacheStore`, `embeddingCacheStoreBatch`,
+  `embeddingCacheClear` — delegate to shared helpers in `embeddingCache.ts`
+  (`lookupEmbeddingCacheImpl`, `lookupEmbeddingCacheBatchImpl`,
+  `clearEmbeddingCacheImpl`, and existing upsert helpers). Regenerate Convex
+  codegen after upgrading so `ComponentApi` includes these under `content`.
+- **`componentWithEmbeddingCache`:** Now returns a new object that spreads the
+  component handle and sets `embeddingCache` to real function references from
+  `component.content.embeddingCache*`. You can also call those `content.*`
+  functions directly.
+
 ## 0.1.11
 
 - **Breaking:** Removed the `RAG` re-export; use `StringRAG` from `"string-rag"`.
